@@ -1,0 +1,118 @@
+stage_1:
+  target: stage1.RAE
+  params:
+    encoder_cls: 'MAEwNorm'
+    encoder_config_path: 'facebook/vit-mae-base'
+    encoder_input_size: 256
+    encoder_params:
+      model_name: 'facebook/vit-mae-base'
+    decoder_config_path: 'configs/decoder/ViTXL'
+    pretrained_decoder_path: 'artifacts/decoders/mae-b/ViTXL_n08/model.pt'
+    noise_tau: 0.0
+    reshape_to_2d: true
+    normalization_stat_path: 'artifacts/normalization_stats/mae-b/stat.pt'
+
+stage_2:
+  target: stage2.models.DDT.DiTwDDTHead
+  params:
+    input_size: 16
+    patch_size: 1
+    in_channels: 768
+    hidden_size: [1152, 2048]
+    depth: [28, 2]
+    num_heads: [16, 16]
+    mlp_ratio: 4.0
+    class_dropout_prob: 0.0
+    num_classes: 8192
+    use_qknorm: false
+    use_swiglu: true
+    use_rope: true
+    use_rmsnorm: true
+    wo_shift: false
+    use_pos_embed: true
+
+    use_y_conditioning: true  # Model: c = silu(t + y)
+
+transport:
+  params:
+    path_type: 'Linear'
+    prediction: 'velocity'
+    loss_weight: null
+    time_dist_type: 'logit-normal_0_1'
+
+sampler:
+  mode: ODE
+  params:
+    sampling_method: 'euler'
+    num_steps: 50
+    atol: 1.0e-6
+    rtol: 1.0e-3
+    reverse: false
+
+guidance:
+  method: 'cfg'
+  scale: 1.0  # No CFG for unconditional
+  t_min: 0.0
+  t_max: 1.0
+
+gmm:
+  enabled: true
+  mode_conditional: true
+  path: 'artifacts/gmm/mae-b/spatial_gmm_from_cls_n8192_diag_k-means++_flip.pkl'
+  cls_enabled: true
+  cls_path: 'artifacts/gmm/mae-b/gmm_n8192_diag_k-means++.pkl'
+
+misc:
+  latent_size: [768, 16, 16]
+  num_classes: 1000  # ImageNet classes (for dataset compatibility)
+  time_dist_shift_dim: 196608
+  time_dist_shift_base: 4096
+
+  # No adaptive weighting (no classes/modes to reweight)
+  adaptive_weighting:
+    enabled: true  # Enable to focus on weak/rare modes
+
+    strategy: 'focal'  # 'focal', 'inverse', 'sqrt', 'log'
+    focal_gamma: 2.0   # 2.0 = aggressive reweighting for hard modes
+
+    normalize: true    # Weights average to 1.0 (stable learning rate)
+
+    min_weight: 0.3    # Don't downweight easy modes too much
+    max_weight: 3.0    # Don't upweight hard modes too much
+
+    ema_decay: 0.9995  # Slow adaptation (stable statistics)
+    warmup_steps: 2500 # Collect statistics before reweighting
+
+training:
+  global_seed: 0
+  epochs: 80
+  global_batch_size: 1024
+  grad_accum_steps: 16
+  num_workers: 4
+  log_every: 100
+  ckpt_every: 5000
+  sample_every: 25000
+  initial_phase_epochs: 20
+  initial_lr: 0.0004
+  initial_ema_decay: 0.999
+  base_lr: 0.0002
+  final_lr: 0.00002
+  ema_decay: 0.9995
+  beta: [0.9, 0.95]
+  wd: 0.0
+  schedule_type: 'linear'
+  decay_start_epoch: 40
+  decay_end_epoch: 800
+  clip_grad: 1.0
+
+fid:
+  enabled: true
+  eval_every: 25000
+  num_samples: 50000
+  batch_size: 2
+  ref_batch_path: 'artifacts/fid_reference/VIRTUAL_imagenet256_labeled.npz'
+
+data_limit:
+  enabled: false           # Set to true to enable data limiting
+  percentage: 0.1          # Percentage of data to use per class (0.0-1.0)
+  seed: 42                 # Random seed for reproducible sampling
