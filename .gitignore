@@ -209,4 +209,4 @@ __marimo__/
 Scale-RAE
 
 # downloaded pretrained artifacts (Hugging Face)
-artifacts/
+artifacts
