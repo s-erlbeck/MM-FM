@@ -10,9 +10,9 @@ Output format (NPZ file):
     - sigma: Covariance matrix (shape: 2048 x 2048)
 
 Usage:
-    # For ImageFolder (ImageNet):
+    # For ImageNetDataset (ImageNet):
     python src/scripts/compute_fid_reference.py \
-        --data-path /path/to/imagenet/train \
+        --data-path /path/to/imagenet/train_blurred.zip \
         --output models/fid_refs/imagenet256.npz \
         --image-size 256 \
         --num-samples 50000 \
@@ -20,7 +20,7 @@ Usage:
 
     # For faster processing with multiple GPUs:
     torchrun --nproc_per_node=4 src/scripts/compute_fid_reference.py \
-        --data-path /path/to/imagenet/train \
+        --data-path /path/to/imagenet/train_blurred.zip \
         --output models/fid_refs/imagenet256.npz \
         --num-samples 50000
 """
@@ -41,9 +41,10 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
-from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 from PIL import Image
+
+from utils.data_utils import ImageNetDataset
 
 
 class InceptionV3Detector(torch.nn.Module):
@@ -217,7 +218,7 @@ def main():
 
     # Data settings
     parser.add_argument("--data-path", type=str, default=None,
-                        help="Path to ImageFolder dataset")
+                        help="Path to the train_blurred.zip archive (see ImageNetDataset)")
 
     # Output settings
     parser.add_argument("--output", type=str, required=True,
@@ -268,11 +269,11 @@ def main():
     # Get transform
     transform = get_fid_transform(args.image_size)
 
-    # Create dataset and dataloader (ImageFolder)
+    # Create dataset and dataloader (ImageNetDataset)
     if rank == 0:
-        print(f"Loading ImageFolder from: {args.data_path}")
+        print(f"Loading ImageNetDataset from: {args.data_path}")
 
-    full_dataset = ImageFolder(args.data_path, transform=transform)
+    full_dataset = ImageNetDataset(args.data_path, transform=transform)
 
     # Subsample if dataset is larger than num_samples
     if len(full_dataset) > args.num_samples:

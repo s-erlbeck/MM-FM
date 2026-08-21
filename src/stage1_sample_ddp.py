@@ -3,7 +3,7 @@
 
 """
 Runs distributed reconstructions with a pre-trained stage-1 model.
-Inputs are loaded from an ImageFolder dataset, processed with center crops,
+Inputs are loaded from an ImageNetDataset, processed with center crops,
 and the reconstructed images are saved as .png files alongside a packed .npz.
 """
 import argparse
@@ -20,12 +20,12 @@ from PIL import Image
 from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader, Subset
 from torchvision import transforms
-from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 import numpy as np
 
 from sample_ddp import create_npz_from_sample_folder
 from stage1 import RAE
+from utils.data_utils import ImageNetDataset
 from utils.model_utils import instantiate_from_config
 from utils.train_utils import parse_configs
 
@@ -51,8 +51,8 @@ def center_crop_arr(pil_image: Image.Image, image_size: int) -> Image.Image:
     return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
 
 
-class IndexedImageFolder(ImageFolder):
-    """ImageFolder that also returns the dataset index."""
+class IndexedImageNetDataset(ImageNetDataset):
+    """ImageNetDataset that also returns the dataset index."""
 
     def __getitem__(self, index):
         image, _ = super().__getitem__(index)
@@ -101,7 +101,7 @@ def main(args):
         transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.image_size)),
         transforms.ToTensor(),
     ])
-    dataset = IndexedImageFolder(args.data_path, transform=transform)
+    dataset = IndexedImageNetDataset(args.data_path, transform=transform)
     total_available = len(dataset)
     if total_available == 0:
         raise ValueError(f"No images found at {args.data_path}.")
@@ -169,7 +169,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to the config file.")
-    parser.add_argument("--data-path", type=str, required=True, help="Path to an ImageFolder directory with input images.")
+    parser.add_argument("--data-path", type=str, required=True, help="Path to the train/val_blurred.zip archive (see ImageNetDataset).")
     parser.add_argument("--sample-dir", type=str, default="samples", help="Directory to store reconstructed samples.")
     parser.add_argument("--per-proc-batch-size", type=int, default=4, help="Number of images processed per GPU step.")
     parser.add_argument("--num-samples", type=int, default=None, help="Number of samples to reconstruct (defaults to full dataset).")

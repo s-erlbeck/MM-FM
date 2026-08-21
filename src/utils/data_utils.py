@@ -1,12 +1,65 @@
-import torch
+import io
+import os
+from zipfile import ZipFile, BadZipfile
+
+from PIL import Image
 import numpy as np
+import torch
+
+
+class ImageNetDataset(torch.utils.data.Dataset):
+    # compare https://hpc.pages.naiss.se/user-documentation/support-docs/arrhenius_hpc/data_management/central_datasets/
+    def __init__(self, zfpath: str, transform=None):
+        self.zfpath = zfpath
+        self.transform = transform
+
+        # Avoid reusing the file handle created here, for known issue with multi-worker:
+        # https://discuss.pytorch.org/t/dataloader-with-zipfile-failed/42795
+        self.zf = None
+        with ZipFile(self.zfpath) as zf:
+            self.imglist: list[str] = [path for path in zf.namelist() if path.endswith(".jpg")]
+
+        # Images are structured in directories based on class; map_clsloc.txt lives alongside the zip
+        with open(os.path.join(os.path.dirname(self.zfpath), "map_clsloc.txt")) as f:
+            self.classes: dict[str, int] = dict(self.parse_row(row) for row in f)
+
+        # populate targets in order to use ClassBalancedSubset
+        self.targets = [self.get_label(p) for p in self.imglist]
+
+    def parse_row(self, row: str) -> tuple[str, int]:
+        classname, classnum, _ = row.split()
+        return classname, (int(classnum) - 1)
+
+    def get_label(self, path: str) -> int:
+        classname: str = path.split("/")[-2]
+        return self.classes[classname]
+
+    def __len__(self):
+        return len(self.imglist)
+
+    def __getitem__(self, idx: int) -> tuple[Image.Image, int]:
+        if self.zf is None:
+            self.zf=ZipFile(self.zfpath)
+
+        imgpath = self.imglist[idx]
+        try:
+            img = Image.open(io.BytesIO(self.zf.read(imgpath)))
+        except BadZipfile:
+            # It seems that sometimes the zipfile handle can become bad
+            self.zf = ZipFile(self.zfpath)
+            img = Image.open(io.BytesIO(self.zf.read(imgpath)))
+        if self.transform is not None:
+            img = self.transform(img)
+        label = self.targets[idx]
+        return img, label
+
 
 
 class ClassBalancedSubset(torch.utils.data.Dataset):
     """
     Wrapper that samples a percentage of data from each class while maintaining class balance,
     optionally also subsampling the set of classes itself.
-    Only supports ImageFolder (requires .targets attribute).
+    Requires the base dataset to have a .targets attribute (e.g. ImageFolder, ImageNetDataset).
 
     Args:
         base_dataset: The underlying dataset (must have .targets attribute)
@@ -19,9 +72,8 @@ class ClassBalancedSubset(torch.utils.data.Dataset):
         self.sample_percentage = sample_percentage
         self.class_percentage = class_percentage
 
-        # Only ImageFolder is supported
         if not hasattr(base_dataset, 'targets'):
-            raise ValueError("ClassBalancedSubset only supports ImageFolder datasets")
+            raise ValueError("ClassBalancedSubset requires a base dataset with a .targets attribute")
 
         all_labels = base_dataset.targets
 

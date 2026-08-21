@@ -14,7 +14,6 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torchvision.datasets import ImageFolder
 from torchvision import transforms
 import numpy as np
 from collections import OrderedDict
@@ -36,7 +35,7 @@ from stage2.transport.gmm_sampler import GMMSampler
 from stage2.transport.adaptive_weighter import AdaptiveClassWeighter
 from utils.train_utils import parse_configs
 from utils.model_utils import instantiate_from_config, is_model_conditional
-from utils.data_utils import ClassBalancedSubset
+from utils.data_utils import ClassBalancedSubset, ImageNetDataset
 from utils import wandb_utils
 from utils.optim_utils import build_optimizer, build_scheduler
 from utils.eval_utils import evaluate_fid
@@ -159,7 +158,7 @@ def main(args):
     data_limit_cfg = to_dict(data_limit_config)
     data_cfg = to_dict(data_config)
 
-    # Validate --data-path is provided (ImageFolder is the only supported data source)
+    # Validate --data-path is provided (ImageNetDataset is the only supported data source)
     if args.data_path is None:
         raise ValueError("--data-path is required")
 
@@ -359,14 +358,14 @@ def main(args):
     opt_state = None
 
     # ========================================================================
-    # DATA LOADING: ImageFolder (local dataset with class structure)
+    # DATA LOADING: ImageNetDataset (reads directly from a train/val_blurred.zip)
     # ========================================================================
     transform = transforms.Compose([
         transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.image_size)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
     ])
-    dataset = ImageFolder(args.data_path, transform=transform)
+    dataset = ImageNetDataset(args.data_path, transform=transform)
 
     # Apply data limiting if configured (before DistributedSampler)
     data_limit_enabled = data_limit_cfg.get('enabled', False)
@@ -989,7 +988,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to the config file.")
-    parser.add_argument("--data-path", type=str, default=None, help="Path to the training dataset root (ImageFolder).")
+    parser.add_argument("--data-path", type=str, default=None, help="Path to the train_blurred.zip archive (see ImageNetDataset).")
     parser.add_argument("--results-dir", type=str, default="results", help="Directory to store training outputs.")
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256, help="Input image resolution.")
     parser.add_argument("--precision", type=str, choices=["fp32", "bf16"], default="fp32", help="Compute precision for training.")

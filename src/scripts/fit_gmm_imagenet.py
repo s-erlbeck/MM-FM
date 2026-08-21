@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Fit Gaussian Mixture Model (GMM) on CLS tokens from ImageNet (ImageFolder format).
+Fit Gaussian Mixture Model (GMM) on CLS tokens from ImageNet (ImageNetDataset).
 
 This script extracts CLS tokens from a vision encoder (e.g., SigLIP2, DINOv2) on
 ImageNet and fits a GMM for mode-conditional generation.
 
 Key features:
 - Supports any encoder via command-line arguments (SigLIP2, DINOv2, etc.)
-- Works with ImageFolder format (ImageNet structure)
+- Reads directly from a train_blurred.zip archive via ImageNetDataset
 - Multi-GPU distributed extraction for faster processing
 - Sequential GMM fitting with full CPU utilization
 - Saves GMM model for use in spatial_gmm_imagenet.py
@@ -15,7 +15,7 @@ Key features:
 Usage:
     # Single GPU with SigLIP2 (default)
     python src/scripts/fit_gmm_imagenet.py \
-        --data-path /path/to/imagenet/train \
+        --data-path /path/to/imagenet/train_blurred.zip \
         --config configs/stage2/training/ImageNet256/DiTDH-XL_SigLIP2-B-UNCONDITIONAL.yaml \
         --output-dir results/clustering/siglip2-base-imagenet-gmm-8192-diag \
         --n-components 8192 \
@@ -23,7 +23,7 @@ Usage:
 
     # Multi-GPU (recommended for large datasets)
     torchrun --nproc_per_node=8 src/scripts/fit_gmm_imagenet.py \
-        --data-path /path/to/imagenet/train \
+        --data-path /path/to/imagenet/train_blurred.zip \
         --config configs/stage2/training/ImageNet256/DiTDH-XL_SigLIP2-B-UNCONDITIONAL.yaml \
         --output-dir results/clustering/siglip2-base-imagenet-gmm-8192-diag \
         --n-components 8192 \
@@ -31,7 +31,7 @@ Usage:
 
     # With DINOv2 encoder
     torchrun --nproc_per_node=8 src/scripts/fit_gmm_imagenet.py \
-        --data-path /path/to/imagenet/train \
+        --data-path /path/to/imagenet/train_blurred.zip \
         --config configs/stage2/training/ImageNet256/DiTDH-XL_DINOv2-B-UNCONDITIONAL.yaml \
         --output-dir results/clustering/dinov2-base-imagenet-gmm-8192-diag \
         --n-components 8192 \
@@ -55,7 +55,6 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torchvision.datasets import ImageFolder
 from torchvision import transforms
 from sklearn.mixture import GaussianMixture
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
@@ -70,7 +69,7 @@ if src_path not in sys.path:
 
 from stage1.encoders import ARCHS
 from transformers import AutoImageProcessor
-from utils.data_utils import ClassBalancedSubset
+from utils.data_utils import ClassBalancedSubset, ImageNetDataset
 
 
 def center_crop_arr(pil_image, image_size):
@@ -110,7 +109,7 @@ def extract_cls_tokens_distributed(
     precision: str = "bf16",
 ):
     """
-    Extract CLS tokens from encoder using ImageFolder dataset.
+    Extract CLS tokens from encoder using ImageNetDataset.
 
     Returns:
         cls_tokens: numpy array of shape (N, hidden_size)
@@ -291,12 +290,12 @@ def plot_gmm_weights(weights: np.ndarray, output_path: str, n_components: int):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fit GMM on CLS tokens from ImageNet (ImageFolder format)"
+        description="Fit GMM on CLS tokens from ImageNet (ImageNetDataset)"
     )
 
     # Data settings
     parser.add_argument("--data-path", type=str, required=True,
-                        help="Path to ImageNet dataset root (ImageFolder structure)")
+                        help="Path to the train_blurred.zip archive (see ImageNetDataset)")
     parser.add_argument("--config", type=str, required=True,
                         help="Path to training config (for encoder settings)")
     parser.add_argument("--output-dir", type=str, required=True,
@@ -409,7 +408,7 @@ def main():
 
         # Create dataset with transform
         transform = get_transform(image_size, proc.image_mean, proc.image_std)
-        dataset = ImageFolder(args.data_path, transform=transform)
+        dataset = ImageNetDataset(args.data_path, transform=transform)
 
         # Apply data limiting
         if data_limited:

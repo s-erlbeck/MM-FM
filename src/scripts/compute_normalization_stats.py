@@ -7,11 +7,11 @@ position-wise mean and variance statistics. These stats are used to normalize
 latents before feeding them to the diffusion model (Stage 2).
 
 Usage:
-    # For ImageFolder (ImageNet):
+    # For ImageNetDataset (ImageNet):
     python src/scripts/compute_normalization_stats.py \
         --encoder-cls Dinov2withNorm \
         --encoder-config facebook/dinov2-with-registers-base \
-        --data-path /path/to/imagenet/train \
+        --data-path /path/to/imagenet/train_blurred.zip \
         --output models/stats/dinov2/imagenet/stat.pt \
         --num-samples 50000 \
         --batch-size 64
@@ -30,9 +30,10 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 from math import sqrt
+
+from utils.data_utils import ImageNetDataset
 
 
 def get_encoder(encoder_cls: str, encoder_config: str, encoder_params: dict = None):
@@ -174,7 +175,7 @@ def main():
 
     # Data settings
     parser.add_argument("--data-path", type=str, default=None,
-                        help="Path to ImageFolder dataset")
+                        help="Path to the train_blurred.zip archive (see ImageNetDataset)")
 
     # Output settings
     parser.add_argument("--output", type=str, required=True,
@@ -210,9 +211,9 @@ def main():
     # Get transform
     transform = get_image_transform(args.image_size, args.encoder_config)
 
-    # Create dataset and dataloader (ImageFolder)
-    print(f"Loading ImageFolder from: {args.data_path}")
-    dataset = ImageFolder(args.data_path, transform=transform)
+    # Create dataset and dataloader (ImageNetDataset)
+    print(f"Loading ImageNetDataset from: {args.data_path}")
+    dataset = ImageNetDataset(args.data_path, transform=transform)
 
     dataloader = DataLoader(
         dataset,

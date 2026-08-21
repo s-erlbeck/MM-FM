@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Create Spatial GMM from CLS GMM assignments on ImageNet (ImageFolder format).
+Create Spatial GMM from CLS GMM assignments on ImageNet (ImageNetDataset).
 
 This script transfers cluster assignments from CLS tokens to spatial tokens,
 creating a GMM suitable for sampling spatial latent noise during Stage 2 training.
@@ -21,14 +21,14 @@ Usage:
     # Multi-GPU (recommended)
     torchrun --nproc_per_node=8 src/scripts/spatial_gmm_imagenet.py \
         --cls-gmm-path results/clustering/siglip2-base-imagenet-gmm-8192-diag/gmm_n8192_diag_k-means++.pkl \
-        --data-path /path/to/imagenet/train \
+        --data-path /path/to/imagenet/train_blurred.zip \
         --config configs/stage2/training/ImageNet256/DiTDH-XL_SigLIP2-B-UNCONDITIONAL.yaml \
         --output-dir results/clustering/siglip2-base-imagenet-gmm-8192-diag
 
     # Resume from Pass 2 (if Pass 1 completed but Pass 2 failed)
     python src/scripts/spatial_gmm_imagenet.py \
         --cls-gmm-path results/clustering/siglip2-base-imagenet-gmm-8192-diag/gmm_n8192_diag_k-means++.pkl \
-        --data-path /path/to/imagenet/train \
+        --data-path /path/to/imagenet/train_blurred.zip \
         --config configs/stage2/training/ImageNet256/DiTDH-XL_SigLIP2-B-UNCONDITIONAL.yaml \
         --output-dir results/clustering/siglip2-base-imagenet-gmm-8192-diag \
         --skip-pass1
@@ -55,7 +55,6 @@ torch.backends.cudnn.allow_tf32 = True
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torchvision.datasets import ImageFolder
 from torchvision import transforms
 from sklearn.mixture import GaussianMixture
 from tqdm import tqdm
@@ -70,7 +69,7 @@ if src_path not in sys.path:
 from stage1 import RAE
 from utils.train_utils import parse_configs
 from utils.model_utils import instantiate_from_config
-from utils.data_utils import ClassBalancedSubset
+from utils.data_utils import ClassBalancedSubset, ImageNetDataset
 
 
 def center_crop_arr(pil_image, image_size):
@@ -126,7 +125,7 @@ def pass1_extract_and_assign(
 
     # Create dataset with transform
     transform = get_transform(args.image_size)
-    dataset = ImageFolder(args.data_path, transform=transform)
+    dataset = ImageNetDataset(args.data_path, transform=transform)
 
     # Apply data limiting
     if args.data_limit_sample_percentage < 1.0 or args.data_limit_class_percentage < 1.0:
@@ -435,7 +434,7 @@ def main():
     parser.add_argument("--cls-gmm-path", type=str, required=True,
                         help="Path to CLS GMM pickle file (from fit_gmm_imagenet.py)")
     parser.add_argument("--data-path", type=str, required=True,
-                        help="Path to ImageNet dataset root (ImageFolder structure)")
+                        help="Path to the train_blurred.zip archive (see ImageNetDataset)")
     parser.add_argument("--config", type=str, required=True,
                         help="Path to training config (for RAE settings)")
     parser.add_argument("--output-dir", type=str, required=True,
