@@ -70,6 +70,7 @@ if src_path not in sys.path:
 from stage1 import RAE
 from utils.train_utils import parse_configs
 from utils.model_utils import instantiate_from_config
+from utils.data_utils import ClassBalancedSubset
 
 
 def center_crop_arr(pil_image, image_size):
@@ -88,45 +89,6 @@ def center_crop_arr(pil_image, image_size):
     crop_y = (arr.shape[0] - image_size) // 2
     crop_x = (arr.shape[1] - image_size) // 2
     return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
-
-
-class ClassBalancedSubset(torch.utils.data.Dataset):
-    """
-    Wrapper that samples a percentage of data from each class while maintaining class balance.
-    Only supports ImageFolder (requires .targets attribute).
-    """
-    def __init__(self, base_dataset, percentage=1.0, seed=42):
-        self.base_dataset = base_dataset
-        self.percentage = percentage
-
-        if not hasattr(base_dataset, 'targets'):
-            raise ValueError("ClassBalancedSubset only supports ImageFolder datasets")
-
-        all_labels = base_dataset.targets
-
-        class_to_indices = {}
-        for idx, label in enumerate(all_labels):
-            if label not in class_to_indices:
-                class_to_indices[label] = []
-            class_to_indices[label].append(idx)
-
-        rng = np.random.RandomState(seed)
-        self.selected_indices = []
-
-        for class_id in sorted(class_to_indices.keys()):
-            indices = class_to_indices[class_id]
-            n_samples = max(1, int(len(indices) * percentage))
-            sampled = rng.choice(indices, size=n_samples, replace=False)
-            self.selected_indices.extend(sampled)
-
-        self.selected_indices = sorted(self.selected_indices)
-
-    def __len__(self):
-        return len(self.selected_indices)
-
-    def __getitem__(self, idx):
-        original_idx = self.selected_indices[idx]
-        return self.base_dataset[original_idx]
 
 
 def get_transform(image_size: int):
@@ -167,11 +129,19 @@ def pass1_extract_and_assign(
     dataset = ImageFolder(args.data_path, transform=transform)
 
     # Apply data limiting
-    if args.data_limit_percentage < 1.0:
+    if args.data_limit_sample_percentage < 1.0 or args.data_limit_class_percentage < 1.0:
         if rank == 0:
             original_size = len(dataset)
-            print(f"Applying data limit: {args.data_limit_percentage*100:.1f}% per class (seed={args.data_limit_seed})")
-        dataset = ClassBalancedSubset(dataset, args.data_limit_percentage, args.data_limit_seed)
+            print(
+                f"Applying data limit: {args.data_limit_sample_percentage*100:.1f}% of samples from "
+                f"{args.data_limit_class_percentage*100:.1f}% of classes (seed={args.data_limit_seed})"
+            )
+        dataset = ClassBalancedSubset(
+            dataset,
+            sample_percentage=args.data_limit_sample_percentage,
+            class_percentage=args.data_limit_class_percentage,
+            seed=args.data_limit_seed,
+        )
         if rank == 0:
             print(f"Dataset reduced from {original_size:,} to {len(dataset):,} samples")
 
@@ -487,8 +457,10 @@ def main():
                         help="Chunk size for streaming Gaussian estimation (default: 100k)")
 
     # Data limiting
-    parser.add_argument("--data-limit-percentage", type=float, default=1.0,
-                        help="Percentage of data to use per class (0.0-1.0, default: 1.0)")
+    parser.add_argument("--data-limit-sample-percentage", type=float, default=1.0,
+                        help="Percentage of samples to use per kept class (0.0-1.0, default: 1.0)")
+    parser.add_argument("--data-limit-class-percentage", type=float, default=1.0,
+                        help="Percentage of classes to keep (0.0-1.0, default: 1.0)")
     parser.add_argument("--data-limit-seed", type=int, default=42,
                         help="Random seed for data limiting (default: 42)")
 
@@ -618,6 +590,9 @@ def main():
                 'timestamp': datetime.now().isoformat(),
                 'num_samples': int(cluster_counts.sum()),
                 'spatial_dim': means.shape[1],
+                'data_limit_sample_percentage': args.data_limit_sample_percentage,
+                'data_limit_class_percentage': args.data_limit_class_percentage,
+                'data_limit_seed': args.data_limit_seed,
             },
         }, f)
 

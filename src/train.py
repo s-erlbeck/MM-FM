@@ -371,12 +371,21 @@ def main(args):
     # Apply data limiting if configured (before DistributedSampler)
     data_limit_enabled = data_limit_cfg.get('enabled', False)
     if data_limit_enabled:
-        percentage = data_limit_cfg.get('percentage', 1.0)
+        sample_percentage = data_limit_cfg.get('sample_percentage', 1.0)
+        class_percentage = data_limit_cfg.get('class_percentage', 1.0)
         seed = data_limit_cfg.get('seed', 42)
 
         original_size = len(dataset)
-        logger.info(f"Applying data limit: {percentage*100:.1f}% per class (seed={seed})")
-        dataset = ClassBalancedSubset(dataset, percentage, seed)
+        logger.info(
+            f"Applying data limit: {sample_percentage*100:.1f}% of samples from "
+            f"{class_percentage*100:.1f}% of classes (seed={seed})"
+        )
+        dataset = ClassBalancedSubset(
+            dataset,
+            sample_percentage=sample_percentage,
+            class_percentage=class_percentage,
+            seed=seed,
+        )
         logger.info(f"Dataset reduced from {original_size:,} to {len(dataset):,} samples")
 
     sampler = DistributedSampler(

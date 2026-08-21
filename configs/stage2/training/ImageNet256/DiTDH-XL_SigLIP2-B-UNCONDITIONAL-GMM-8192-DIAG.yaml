@@ -114,5 +114,6 @@ fid:
 
 data_limit:
   enabled: false           # Set to true to enable data limiting
-  percentage: 0.1          # Percentage of data to use per class (0.0-1.0)
+  sample_percentage: 0.1   # Percentage of samples to use per kept class (0.0-1.0)
+  class_percentage: 1.0    # Percentage of classes to keep (0.0-1.0)
   seed: 42                 # Random seed for reproducible sampling
