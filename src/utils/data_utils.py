@@ -19,8 +19,8 @@ class ImageNetDataset(torch.utils.data.Dataset):
         with ZipFile(self.zfpath) as zf:
             self.imglist: list[str] = [path for path in zf.namelist() if path.endswith(".jpg")]
 
-        # Images are structured in directories based on class; map_clsloc.txt lives alongside the zip
-        with open(os.path.join(os.path.dirname(self.zfpath), "map_clsloc.txt")) as f:
+        # Images are structured in directories based on class
+        with open(os.path.join(os.path.dirname(self.zfpath), "devkit", "data", "map_clsloc.txt")) as f:
             self.classes: dict[str, int] = dict(self.parse_row(row) for row in f)
 
         # populate targets in order to use ClassBalancedSubset
