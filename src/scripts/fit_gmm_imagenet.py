@@ -41,7 +41,6 @@ Usage:
 # Fix OpenBLAS threading - must be set before importing numpy/sklearn
 import os
 num_cores = str(len(os.sched_getaffinity(0)))
-print(f"Parallelizing to {num_cores} cores")
 os.environ['OPENBLAS_NUM_THREADS'] = num_cores
 os.environ['MKL_NUM_THREADS'] = num_cores
 os.environ['OMP_NUM_THREADS'] = num_cores
@@ -352,6 +351,7 @@ def main():
 
     if rank == 0:
         os.makedirs(args.output_dir, exist_ok=True)
+        print(f"Parallelizing to {num_cores} cores")
         print("="*80)
         print("GMM Fitting on ImageNet CLS Tokens")
         print("="*80)
