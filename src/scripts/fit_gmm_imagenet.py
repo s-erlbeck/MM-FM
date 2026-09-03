@@ -40,9 +40,11 @@ Usage:
 
 # Fix OpenBLAS threading - must be set before importing numpy/sklearn
 import os
-os.environ['OPENBLAS_NUM_THREADS'] = '64'
-os.environ['MKL_NUM_THREADS'] = '64'
-os.environ['OMP_NUM_THREADS'] = '64'
+num_cores = str(len(os.sched_getaffinity(0)))
+print(f"Parallelizing to {num_cores} cores")
+os.environ['OPENBLAS_NUM_THREADS'] = num_cores
+os.environ['MKL_NUM_THREADS'] = num_cores
+os.environ['OMP_NUM_THREADS'] = num_cores
 
 import sys
 import argparse
