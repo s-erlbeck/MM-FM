@@ -164,9 +164,13 @@ def train_one_epoch(vae: PatchTokenVAE, encoder: SpatialTokenEncoder, dataloader
     amp_dtype = torch.bfloat16 if args.precision == 'bf16' else torch.float32
     use_amp = args.precision == 'bf16'
 
+    epoch_stats = {"loss": 0.0, "rec_loss": 0.0, "kl_loss": 0.0}
+    num_samples = 0
+
     pbar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}")
     for images, _ in pbar:
         images = images.to(device, non_blocking=True)
+        batch_size = images.size(0)
 
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
             patch_grid = encoder(images)
@@ -177,50 +181,57 @@ def train_one_epoch(vae: PatchTokenVAE, encoder: SpatialTokenEncoder, dataloader
         optimizer.step()
 
         step += 1
-        if step % args.log_every == 0:
-            pbar.set_postfix(
-                loss=f"{logs['loss'].item():.4f}",
-                rec=f"{logs['rec_loss'].item():.4f}",
-                kl=f"{logs['kl_loss'].item():.4f}",
-            )
+        epoch_stats["loss"] += logs["loss"].item() * batch_size
+        epoch_stats["rec_loss"] += logs["rec_loss"].item() * batch_size
+        epoch_stats["kl_loss"] += logs["kl_loss"].item() * batch_size
+        num_samples += batch_size
 
-        if args.save_every_steps and step % args.save_every_steps == 0:
-            save_checkpoint(os.path.join(args.output_dir, "vae_latest.pt"), vae, optimizer, epoch + 1, step, args)
+    epoch_stats = {key: value / num_samples for key, value in epoch_stats.items()}
+    if args.wandb:
+        wandb_utils.log({f"train/{key}": value for key, value in epoch_stats.items()}, step=epoch + 1)
 
     return step
 
 
+@torch.no_grad()
 def validate_one_epoch(vae: PatchTokenVAE, encoder: SpatialTokenEncoder, dataloader: DataLoader,
                        device: torch.device, args: argparse.Namespace, epoch: int, step: int) -> int:
     vae.eval()
     amp_dtype = torch.bfloat16 if args.precision == 'bf16' else torch.float32
     use_amp = args.precision == 'bf16'
 
-    pbar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}")
+    epoch_stats = {"loss": 0.0, "rec_loss": 0.0, "kl_loss": 0.0}
+    num_samples = 0
+
+    pbar = tqdm(dataloader, desc=f"Validation {epoch + 1}/{args.epochs}")
     for images, _ in pbar:
         images = images.to(device, non_blocking=True)
+        batch_size = images.size(0)
 
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
             patch_grid = encoder(images)
-            loss, logs = vae.loss(patch_grid, kl_weight=args.kl_weight)
+            _, logs = vae.loss(patch_grid, kl_weight=args.kl_weight)
 
         step += 1
-        if step % args.log_every == 0:
-            pbar.set_postfix(
-                loss=f"{logs['loss'].item():.4f}",
-                rec=f"{logs['rec_loss'].item():.4f}",
-                kl=f"{logs['kl_loss'].item():.4f}",
-            )
+        epoch_stats["loss"] += logs["loss"].item() * batch_size
+        epoch_stats["rec_loss"] += logs["rec_loss"].item() * batch_size
+        epoch_stats["kl_loss"] += logs["kl_loss"].item() * batch_size
+        num_samples += batch_size
 
+    epoch_stats = {key: value / num_samples for key, value in epoch_stats.items()}
+    if args.wandb:
+        wandb_utils.log({f"val/{key}": value for key, value in epoch_stats.items()}, step=epoch + 1)
 
     return step
 
 
-def train(vae: PatchTokenVAE, encoder: SpatialTokenEncoder, dataloader: DataLoader,
+def train(vae: PatchTokenVAE, encoder: SpatialTokenEncoder, train_loader: DataLoader, val_loader: DataLoader,
           optimizer: torch.optim.Optimizer, device: torch.device, args: argparse.Namespace):
     step = 0
+    val_step = 0
     for epoch in range(args.epochs):
-        step = train_one_epoch(vae, encoder, dataloader, optimizer, device, args, epoch, step)
+        step = train_one_epoch(vae, encoder, train_loader, optimizer, device, args, epoch, step)
+        val_step = validate_one_epoch(vae, encoder, val_loader, device, args, epoch, val_step)
         save_checkpoint(os.path.join(args.output_dir, f"vae_epoch{epoch + 1}.pt"), vae, optimizer, epoch + 1, step, args)
 
     final_path = os.path.join(args.output_dir, "vae_final.pt")
@@ -234,6 +245,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Data settings
     parser.add_argument("--data-path", type=str, required=True,
                         help="Path to the train_blurred.zip archive (see ImageNetDataset)")
+    parser.add_argument("--val-data-path", type=str, required=True,
+                        help="Path to the val_blurred.zip archive")
     parser.add_argument("--config", type=str, required=True,
                         help="Path to training config (for encoder settings)")
     parser.add_argument("--output-dir", type=str, required=True,
@@ -269,14 +282,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="AdamW weight decay (default: 0.0)")
     parser.add_argument("--kl-weight", type=float, default=1e-6,
                         help="KL loss weight (default: 1e-6)")
-    parser.add_argument("--log-every", type=int, default=50,
-                        help="Steps between progress bar updates (default: 50)")
-    parser.add_argument("--save-every-steps", type=int, default=2000,
-                        help="Steps between intra-epoch checkpoints, 0 to disable (default: 2000)")
     parser.add_argument("--wandb", action="store_true",
                         help="Enable Weights & Biases logging.")
-    parser.add_argument("--val-data-path", type=str, default=None,
-                        help="Path to the val_blurred.zip archive; validation is skipped if unset")
 
     # Data limiting
     parser.add_argument("--data-limit-sample-percentage", type=float, default=1.0,
@@ -306,7 +313,11 @@ def main():
     vae = build_vae(args, encoder.channels, device)
     optimizer = torch.optim.AdamW(vae.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    train(vae, encoder, train_loader, optimizer, device, args)
+    if args.wandb:
+        exp_name = os.path.basename(os.path.normpath(args.output_dir))
+        wandb_utils.initialize(args, os.environ["ENTITY"], exp_name, "MM-FM")
+
+    train(vae, encoder, train_loader, val_loader, optimizer, device, args)
 
 
 if __name__ == "__main__":
