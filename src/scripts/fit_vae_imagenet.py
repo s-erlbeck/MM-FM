@@ -6,6 +6,7 @@ import argparse
 
 import numpy as np
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from tqdm import tqdm
@@ -18,8 +19,31 @@ if src_path not in sys.path:
 
 from stage1.encoders import ARCHS
 from transformers import AutoImageProcessor
+from utils import wandb_utils
 from utils.data_utils import ClassBalancedSubset, ImageNetDataset
 from vae import PatchTokenVAE
+
+
+class SpatialTokenEncoder(nn.Module):
+    """Wraps a frozen vision encoder, reshaping its spatial tokens into a (C, H, W) patch grid."""
+
+    def __init__(self, encoder, image_size: int, device: torch.device):
+        super().__init__()
+        self.encoder = encoder
+        self.channels, self.h, self.w = self.infer_shape(image_size, device)
+
+    @torch.no_grad()
+    def infer_shape(self, image_size, device):
+        dummy = torch.zeros(1, 3, image_size, image_size, device=device)
+        spatial_tokens, _ = self.encoder(dummy)
+        _, n, c = spatial_tokens.shape
+        h = int(round(n ** 0.5))
+        return c, h, h
+
+    @torch.no_grad()
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        spatial_tokens, _ = self.encoder(images)
+        return spatial_tokens.float().permute(0, 2, 1).reshape(-1, self.channels, self.h, self.w)
 
 
 def center_crop_arr(pil_image, image_size):
@@ -48,6 +72,160 @@ def get_transform(image_size: int, encoder_mean: list, encoder_std: list):
         transforms.ToTensor(),
         normalize,
     ])
+
+
+def load_encoder(config_path: str, device: torch.device):
+    """Load the frozen vision encoder and its preprocessing settings from a training config."""
+    from utils.train_utils import parse_configs
+    rae_config, *_ = parse_configs(config_path)
+
+    encoder_cls = rae_config.params.encoder_cls
+    encoder_config_path = rae_config.params.encoder_config_path
+    encoder_params = dict(rae_config.params.get('encoder_params', {}))
+    image_size = rae_config.params.get('encoder_input_size', 224)
+
+    print(f"\nEncoder: {encoder_cls}")
+    print(f"Config: {encoder_config_path}")
+    print(f"Image size: {image_size}")
+
+    encoder_class = ARCHS[encoder_cls]
+    encoder = encoder_class(**encoder_params).to(device)
+    encoder.eval()
+
+    proc = AutoImageProcessor.from_pretrained(encoder_config_path)
+    print(f"\nEncoder loaded: {encoder_cls}")
+    print(f"Hidden size: {encoder.hidden_size}")
+
+    encoder = SpatialTokenEncoder(encoder, image_size, device)
+    print(f"Patch grid: {encoder.h}x{encoder.w}, channels={encoder.channels}")
+
+    transform = get_transform(image_size, proc.image_mean, proc.image_std)
+    return encoder, transform
+
+
+def build_dataset(data_path: str, transform: transforms.Compose, args: argparse.Namespace,
+                   sample_percentage: float, shuffle: bool) -> DataLoader:
+    dataset = ImageNetDataset(data_path, transform=transform)
+
+    if sample_percentage < 1.0 or args.data_limit_class_percentage < 1.0:
+        print(f"\nApplying data limit: {sample_percentage*100:.1f}% of samples from "
+              f"{args.data_limit_class_percentage*100:.1f}% of classes (seed={args.data_limit_seed})")
+        original_size = len(dataset)
+        dataset = ClassBalancedSubset(
+            dataset,
+            sample_percentage=sample_percentage,
+            class_percentage=args.data_limit_class_percentage,
+            seed=args.data_limit_seed,
+        )
+        print(f"Dataset reduced from {original_size:,} to {len(dataset):,} samples")
+    else:
+        print(f"Dataset size: {len(dataset):,}")
+
+    return DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=shuffle,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=False,
+    )
+
+
+def build_vae(args: argparse.Namespace, in_channels: int, device: torch.device) -> PatchTokenVAE:
+    vae = PatchTokenVAE(
+        in_channels=in_channels,
+        latent_channels=args.latent_channels,
+        hidden_channels=args.hidden_channels,
+        num_res_blocks=args.num_res_blocks,
+        num_groups=args.num_groups,
+        dropout=args.dropout,
+    ).to(device)
+    print(f"\nVAE: in_channels={in_channels}, latent_channels={args.latent_channels}, "
+          f"hidden_channels={args.hidden_channels}, num_res_blocks={args.num_res_blocks}")
+    return vae
+
+
+def save_checkpoint(path: str, vae: PatchTokenVAE, optimizer: torch.optim.Optimizer,
+                     epoch: int, step: int, args: argparse.Namespace):
+    torch.save({
+        "model": vae.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "epoch": epoch,
+        "step": step,
+        "args": vars(args),
+    }, path)
+    print(f"Saved checkpoint: {path}")
+
+
+def train_one_epoch(vae: PatchTokenVAE, encoder: SpatialTokenEncoder, dataloader: DataLoader,
+                     optimizer: torch.optim.Optimizer, device: torch.device,
+                     args: argparse.Namespace, epoch: int, step: int) -> int:
+    vae.train()
+    amp_dtype = torch.bfloat16 if args.precision == 'bf16' else torch.float32
+    use_amp = args.precision == 'bf16'
+
+    pbar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}")
+    for images, _ in pbar:
+        images = images.to(device, non_blocking=True)
+
+        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+            patch_grid = encoder(images)
+            loss, logs = vae.loss(patch_grid, kl_weight=args.kl_weight)
+
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+
+        step += 1
+        if step % args.log_every == 0:
+            pbar.set_postfix(
+                loss=f"{logs['loss'].item():.4f}",
+                rec=f"{logs['rec_loss'].item():.4f}",
+                kl=f"{logs['kl_loss'].item():.4f}",
+            )
+
+        if args.save_every_steps and step % args.save_every_steps == 0:
+            save_checkpoint(os.path.join(args.output_dir, "vae_latest.pt"), vae, optimizer, epoch + 1, step, args)
+
+    return step
+
+
+def validate_one_epoch(vae: PatchTokenVAE, encoder: SpatialTokenEncoder, dataloader: DataLoader,
+                       device: torch.device, args: argparse.Namespace, epoch: int, step: int) -> int:
+    vae.eval()
+    amp_dtype = torch.bfloat16 if args.precision == 'bf16' else torch.float32
+    use_amp = args.precision == 'bf16'
+
+    pbar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}")
+    for images, _ in pbar:
+        images = images.to(device, non_blocking=True)
+
+        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+            patch_grid = encoder(images)
+            loss, logs = vae.loss(patch_grid, kl_weight=args.kl_weight)
+
+        step += 1
+        if step % args.log_every == 0:
+            pbar.set_postfix(
+                loss=f"{logs['loss'].item():.4f}",
+                rec=f"{logs['rec_loss'].item():.4f}",
+                kl=f"{logs['kl_loss'].item():.4f}",
+            )
+
+
+    return step
+
+
+def train(vae: PatchTokenVAE, encoder: SpatialTokenEncoder, dataloader: DataLoader,
+          optimizer: torch.optim.Optimizer, device: torch.device, args: argparse.Namespace):
+    step = 0
+    for epoch in range(args.epochs):
+        step = train_one_epoch(vae, encoder, dataloader, optimizer, device, args, epoch, step)
+        save_checkpoint(os.path.join(args.output_dir, f"vae_epoch{epoch + 1}.pt"), vae, optimizer, epoch + 1, step, args)
+
+    final_path = os.path.join(args.output_dir, "vae_final.pt")
+    torch.save({"model": vae.state_dict(), "args": vars(args)}, final_path)
+    print(f"\nSaved final VAE model to {final_path}")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -95,6 +273,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Steps between progress bar updates (default: 50)")
     parser.add_argument("--save-every-steps", type=int, default=2000,
                         help="Steps between intra-epoch checkpoints, 0 to disable (default: 2000)")
+    parser.add_argument("--wandb", action="store_true",
+                        help="Enable Weights & Biases logging.")
+    parser.add_argument("--val-data-path", type=str, default=None,
+                        help="Path to the val_blurred.zip archive; validation is skipped if unset")
 
     # Data limiting
     parser.add_argument("--data-limit-sample-percentage", type=float, default=1.0,
@@ -107,161 +289,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def load_encoder(config_path: str, device: torch.device):
-    """Load the frozen vision encoder and its preprocessing settings from a training config."""
-    from utils.train_utils import parse_configs
-    rae_config, *_ = parse_configs(config_path)
-
-    encoder_cls = rae_config.params.encoder_cls
-    encoder_config_path = rae_config.params.encoder_config_path
-    encoder_params = dict(rae_config.params.get('encoder_params', {}))
-    image_size = rae_config.params.get('encoder_input_size', 224)
-
-    print(f"\nEncoder: {encoder_cls}")
-    print(f"Config: {encoder_config_path}")
-    print(f"Image size: {image_size}")
-
-    encoder_class = ARCHS[encoder_cls]
-    encoder = encoder_class(**encoder_params).to(device)
-    encoder.eval()
-
-    proc = AutoImageProcessor.from_pretrained(encoder_config_path)
-    print(f"\nEncoder loaded: {encoder_cls}")
-    print(f"Hidden size: {encoder.hidden_size}")
-
-    return encoder, image_size, proc
-
-
-def build_dataloader(args: argparse.Namespace, image_size: int, proc) -> DataLoader:
-    transform = get_transform(image_size, proc.image_mean, proc.image_std)
-    dataset = ImageNetDataset(args.data_path, transform=transform)
-
-    if args.data_limit_sample_percentage < 1.0 or args.data_limit_class_percentage < 1.0:
-        original_size = len(dataset)
-        print(
-            f"\nApplying data limit: {args.data_limit_sample_percentage*100:.1f}% of samples from "
-            f"{args.data_limit_class_percentage*100:.1f}% of classes (seed={args.data_limit_seed})"
-        )
-        dataset = ClassBalancedSubset(
-            dataset,
-            sample_percentage=args.data_limit_sample_percentage,
-            class_percentage=args.data_limit_class_percentage,
-            seed=args.data_limit_seed,
-        )
-        print(f"Dataset reduced from {original_size:,} to {len(dataset):,} samples")
-
-    return DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=False,
-    )
-
-
-def build_vae(args: argparse.Namespace, in_channels: int, device: torch.device) -> PatchTokenVAE:
-    vae = PatchTokenVAE(
-        in_channels=in_channels,
-        latent_channels=args.latent_channels,
-        hidden_channels=args.hidden_channels,
-        num_res_blocks=args.num_res_blocks,
-        num_groups=args.num_groups,
-        dropout=args.dropout,
-    ).to(device)
-    print(f"\nVAE: in_channels={in_channels}, latent_channels={args.latent_channels}, "
-          f"hidden_channels={args.hidden_channels}, num_res_blocks={args.num_res_blocks}")
-    return vae
-
-
-def save_checkpoint(path: str, vae: PatchTokenVAE, optimizer: torch.optim.Optimizer,
-                     epoch: int, step: int, args: argparse.Namespace):
-    torch.save({
-        "model": vae.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "epoch": epoch,
-        "step": step,
-        "args": vars(args),
-    }, path)
-    print(f"Saved checkpoint: {path}")
-
-
-def infer_size(encoder, image_size: int, device: torch.device) -> tuple:
-    """Run the encoder once on a dummy image to determine its (H, W, C) spatial token grid shape."""
-    dummy = torch.zeros(1, 3, image_size, image_size, device=device)
-    with torch.no_grad():
-        spatial_tokens, _ = encoder(dummy)
-    n, c = spatial_tokens.shape[1], spatial_tokens.shape[2]
-    h = w = int(round(n ** 0.5))
-    return h, w, c
-
-
-def train_one_epoch(vae: PatchTokenVAE, encoder, dataloader: DataLoader,
-                     optimizer: torch.optim.Optimizer, device: torch.device,
-                     args: argparse.Namespace, epoch: int, step: int, grid_size: tuple) -> int:
-    vae.train()
-    amp_dtype = torch.bfloat16 if args.precision == 'bf16' else torch.float32
-    use_amp = args.precision == 'bf16'
-    h, w, c = grid_size
-
-    pbar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}")
-    for images, _ in pbar:
-        images = images.to(device, non_blocking=True)
-
-        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-            with torch.no_grad():
-                spatial_tokens, _ = encoder(images)
-            patch_grid = spatial_tokens.float().permute(0, 2, 1).reshape(-1, c, h, w)
-            loss, logs = vae.loss(patch_grid, kl_weight=args.kl_weight)
-
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
-
-        step += 1
-        if step % args.log_every == 0:
-            pbar.set_postfix(
-                loss=f"{logs['loss'].item():.4f}",
-                rec=f"{logs['rec_loss'].item():.4f}",
-                kl=f"{logs['kl_loss'].item():.4f}",
-            )
-
-        if args.save_every_steps and step % args.save_every_steps == 0:
-            save_checkpoint(os.path.join(args.output_dir, "vae_latest.pt"), vae, optimizer, epoch + 1, step, args)
-
-    return step
-
-
-def train(vae: PatchTokenVAE, encoder, dataloader: DataLoader,
-          optimizer: torch.optim.Optimizer, device: torch.device, args: argparse.Namespace, grid_size: tuple):
-    step = 0
-    for epoch in range(args.epochs):
-        step = train_one_epoch(vae, encoder, dataloader, optimizer, device, args, epoch, step, grid_size)
-        save_checkpoint(os.path.join(args.output_dir, f"vae_epoch{epoch + 1}.pt"), vae, optimizer, epoch + 1, step, args)
-
-    final_path = os.path.join(args.output_dir, "vae_final.pt")
-    torch.save({"model": vae.state_dict(), "args": vars(args)}, final_path)
-    print(f"\nSaved final VAE model to {final_path}")
-
-
 def main():
     args = build_arg_parser().parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    encoder, image_size, proc = load_encoder(args.config, device)
-    dataloader = build_dataloader(args, image_size, proc)
-    print(f"\nDataset size: {len(dataloader.dataset):,}")
+    encoder, transform = load_encoder(args.config, device)
+    train_loader = build_dataset(args.data_path, transform, args, sample_percentage=args.data_limit_sample_percentage, shuffle=True)
+    val_loader = build_dataset(args.val_data_path, transform, args, sample_percentage=1.0, shuffle=False)
+
+    if isinstance(train_loader.dataset, ClassBalancedSubset):
+        assert train_loader.dataset.selected_classes == val_loader.dataset.selected_classes
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    h, w, c = infer_size(encoder, image_size, device)
-    print(f"\nPatch grid: {h}x{w}, channels={c}")
-
-    vae = build_vae(args, c, device)
+    vae = build_vae(args, encoder.channels, device)
     optimizer = torch.optim.AdamW(vae.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    train(vae, encoder, dataloader, optimizer, device, args, (h, w, c))
+    train(vae, encoder, train_loader, optimizer, device, args)
 
 
 if __name__ == "__main__":
