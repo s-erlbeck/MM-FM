@@ -325,7 +325,9 @@ def main():
 
     if args.wandb:
         exp_name = os.path.basename(os.path.normpath(args.output_dir))
-        wandb_utils.initialize(args, os.environ["ENTITY"], exp_name, "MM-FM")
+        wandb_utils.initialize(args, "plankton-diffusion", exp_name, "mm-fm")
+        if "SLURM_JOB_ID" in os.environ:
+            print(f"Running Slurm job {os.environ["SLURM_JOB_ID"]}")
 
     train(vae, encoder, train_loader, val_loader, optimizer, device, args)
 
