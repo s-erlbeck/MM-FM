@@ -221,8 +221,8 @@ def validate_one_epoch(vae: PatchTokenVAE, encoder: SpatialTokenEncoder, dataloa
         loss_metrics["loss"].update(loss.expand(images.size(0)))
         loss_metrics["rec_loss"].update(rec_loss.expand(images.size(0)))
         loss_metrics["kl_loss"].update(kl_loss.expand(images.size(0)))
-        mse_metric.update(x_rec_mode, patch_grid)
-        mae_metric.update(x_rec_mode, patch_grid)
+        mse_metric.update(x_rec_mode.contiguous(), patch_grid.contiguous())
+        mae_metric.update(x_rec_mode.contiguous(), patch_grid.contiguous())
         cos_sim_metric.update(x_rec_mode.flatten(1), patch_grid.flatten(1))
 
     epoch_stats = {name: metric.compute().item() for name, metric in loss_metrics.items()}
