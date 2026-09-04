@@ -7,7 +7,9 @@ import argparse
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torchmetrics import CosineSimilarity, MeanAbsoluteError, MeanMetric, MeanSquaredError
 from torchvision import transforms
 from tqdm import tqdm
 from PIL import Image
@@ -164,13 +166,11 @@ def train_one_epoch(vae: PatchTokenVAE, encoder: SpatialTokenEncoder, dataloader
     amp_dtype = torch.bfloat16 if args.precision == 'bf16' else torch.float32
     use_amp = args.precision == 'bf16'
 
-    epoch_stats = {"loss": 0.0, "rec_loss": 0.0, "kl_loss": 0.0}
-    num_samples = 0
+    metrics = {name: MeanMetric().to(device) for name in ("loss", "rec_loss", "kl_loss")}
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}")
     for images, _ in pbar:
         images = images.to(device, non_blocking=True)
-        batch_size = images.size(0)
 
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
             patch_grid = encoder(images)
@@ -181,12 +181,10 @@ def train_one_epoch(vae: PatchTokenVAE, encoder: SpatialTokenEncoder, dataloader
         optimizer.step()
 
         step += 1
-        epoch_stats["loss"] += logs["loss"].item() * batch_size
-        epoch_stats["rec_loss"] += logs["rec_loss"].item() * batch_size
-        epoch_stats["kl_loss"] += logs["kl_loss"].item() * batch_size
-        num_samples += batch_size
+        for name, metric in metrics.items():
+            metric.update(logs[name].expand(images.size(0)))
 
-    epoch_stats = {key: value / num_samples for key, value in epoch_stats.items()}
+    epoch_stats = {name: metric.compute().item() for name, metric in metrics.items()}
     if args.wandb:
         wandb_utils.log({f"train/{key}": value for key, value in epoch_stats.items()}, step=epoch + 1)
 
@@ -200,25 +198,37 @@ def validate_one_epoch(vae: PatchTokenVAE, encoder: SpatialTokenEncoder, dataloa
     amp_dtype = torch.bfloat16 if args.precision == 'bf16' else torch.float32
     use_amp = args.precision == 'bf16'
 
-    epoch_stats = {"loss": 0.0, "rec_loss": 0.0, "kl_loss": 0.0}
-    num_samples = 0
+    loss_metrics = {name: MeanMetric().to(device) for name in ("loss", "rec_loss", "kl_loss")}
+    mse_metric = MeanSquaredError().to(device)
+    mae_metric = MeanAbsoluteError().to(device)
+    cos_sim_metric = CosineSimilarity(reduction="mean").to(device)
 
     pbar = tqdm(dataloader, desc=f"Validation {epoch + 1}/{args.epochs}")
     for images, _ in pbar:
         images = images.to(device, non_blocking=True)
-        batch_size = images.size(0)
 
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
             patch_grid = encoder(images)
-            _, logs = vae.loss(patch_grid, kl_weight=args.kl_weight)
+            # loss terms use a sampled latent, to stay comparable to training
+            x_rec, posterior = vae(patch_grid)
+            rec_loss = F.mse_loss(x_rec, patch_grid)
+            kl_loss = posterior.kl().mean()
+            loss = rec_loss + args.kl_weight * kl_loss
+            # reconstruction metrics use the posterior mode, i.e. without sampling noise
+            x_rec_mode = vae.decode(posterior.mode())
 
         step += 1
-        epoch_stats["loss"] += logs["loss"].item() * batch_size
-        epoch_stats["rec_loss"] += logs["rec_loss"].item() * batch_size
-        epoch_stats["kl_loss"] += logs["kl_loss"].item() * batch_size
-        num_samples += batch_size
+        loss_metrics["loss"].update(loss.expand(images.size(0)))
+        loss_metrics["rec_loss"].update(rec_loss.expand(images.size(0)))
+        loss_metrics["kl_loss"].update(kl_loss.expand(images.size(0)))
+        mse_metric.update(x_rec_mode, patch_grid)
+        mae_metric.update(x_rec_mode, patch_grid)
+        cos_sim_metric.update(x_rec_mode.flatten(1), patch_grid.flatten(1))
 
-    epoch_stats = {key: value / num_samples for key, value in epoch_stats.items()}
+    epoch_stats = {name: metric.compute().item() for name, metric in loss_metrics.items()}
+    epoch_stats["mse"] = mse_metric.compute().item()
+    epoch_stats["mae"] = mae_metric.compute().item()
+    epoch_stats["cos_sim"] = cos_sim_metric.compute().item()
     if args.wandb:
         wandb_utils.log({f"val/{key}": value for key, value in epoch_stats.items()}, step=epoch + 1)
 
