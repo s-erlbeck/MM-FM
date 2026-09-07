@@ -3,6 +3,7 @@
 import os
 import sys
 import argparse
+from typing import Optional
 
 import numpy as np
 import torch
@@ -27,12 +28,23 @@ from vae import PatchTokenVAE
 
 
 class SpatialTokenEncoder(nn.Module):
-    """Wraps a frozen vision encoder, reshaping its spatial tokens into a (C, H, W) patch grid."""
+    """Wraps a frozen vision encoder, reshaping its spatial tokens into a (C, H, W) patch grid
+    and applying RAE-normalization."""
 
-    def __init__(self, encoder, image_size: int, device: torch.device):
+    def __init__(self, encoder, image_size: int, device: torch.device,
+                 normalization_stat_path: Optional[str] = None, eps: float = 1e-5):
         super().__init__()
         self.encoder = encoder
         self.channels, self.h, self.w = self.infer_shape(image_size, device)
+        if normalization_stat_path is not None:
+            stats = torch.load(normalization_stat_path, map_location=device)
+            self.latent_mean = stats.get('mean', 0)
+            self.latent_var = stats.get('var', 1)
+            self.do_normalization = True
+            self.eps = eps
+            print(f"Loaded normalization stats from {normalization_stat_path}")
+        else:
+            self.do_normalization = False
 
     @torch.no_grad()
     def infer_shape(self, image_size, device):
@@ -45,7 +57,10 @@ class SpatialTokenEncoder(nn.Module):
     @torch.no_grad()
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         spatial_tokens, _ = self.encoder(images)
-        return spatial_tokens.float().permute(0, 2, 1).reshape(-1, self.channels, self.h, self.w)
+        z = spatial_tokens.float().permute(0, 2, 1).reshape(-1, self.channels, self.h, self.w)
+        if self.do_normalization:
+            z = (z - self.latent_mean) / torch.sqrt(self.latent_var + self.eps)
+        return z
 
 
 def center_crop_arr(pil_image, image_size):
@@ -76,7 +91,7 @@ def get_transform(image_size: int, encoder_mean: list, encoder_std: list):
     ])
 
 
-def load_encoder(config_path: str, device: torch.device):
+def load_encoder(config_path: str, normalize: bool, device: torch.device):
     """Load the frozen vision encoder and its preprocessing settings from a training config."""
     from utils.train_utils import parse_configs
     rae_config, *_ = parse_configs(config_path)
@@ -85,6 +100,9 @@ def load_encoder(config_path: str, device: torch.device):
     encoder_config_path = rae_config.params.encoder_config_path
     encoder_params = dict(rae_config.params.get('encoder_params', {}))
     image_size = rae_config.params.get('encoder_input_size', 224)
+    # load normalization stats from RAE config as well
+    normalization_stat_path = rae_config.params.get('normalization_stat_path', None) if normalize else None
+    eps = rae_config.params.get('eps', 1e-5)
 
     print(f"\nEncoder: {encoder_cls}")
     print(f"Config: {encoder_config_path}")
@@ -98,7 +116,7 @@ def load_encoder(config_path: str, device: torch.device):
     print(f"\nEncoder loaded: {encoder_cls}")
     print(f"Hidden size: {encoder.hidden_size}")
 
-    encoder = SpatialTokenEncoder(encoder, image_size, device)
+    encoder = SpatialTokenEncoder(encoder, image_size, device, normalization_stat_path, eps)
     print(f"Patch grid: {encoder.h}x{encoder.w}, channels={encoder.channels}")
 
     transform = get_transform(image_size, proc.image_mean, proc.image_std)
@@ -282,6 +300,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="GroupNorm groups (default: 32)")
     parser.add_argument("--dropout", type=float, default=0.0,
                         help="VAE dropout (default: 0.0)")
+    parser.add_argument("--normalize", action="store_true",
+                        help="Train on position-wise normalized RAE patch tokens")
 
     # Training settings
     parser.add_argument("--epochs", type=int, default=1,
@@ -311,7 +331,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    encoder, transform = load_encoder(args.config, device)
+    encoder, transform = load_encoder(args.config, args.normalize, device)
     train_loader = build_dataset(args.data_path, transform, args, sample_percentage=args.data_limit_sample_percentage, shuffle=True)
     val_loader = build_dataset(args.val_data_path, transform, args, sample_percentage=1.0, shuffle=False)
 
