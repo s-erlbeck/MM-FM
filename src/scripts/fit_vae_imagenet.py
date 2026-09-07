@@ -38,8 +38,8 @@ class SpatialTokenEncoder(nn.Module):
         self.channels, self.h, self.w = self.infer_shape(image_size, device)
         if normalization_stat_path is not None:
             stats = torch.load(normalization_stat_path, map_location=device)
-            self.latent_mean = stats.get('mean', 0)
-            self.latent_var = stats.get('var', 1)
+            self.latent_mean = stats.get('mean', None)
+            self.latent_var = stats.get('var', None)
             self.do_normalization = True
             self.eps = eps
             print(f"Loaded normalization stats from {normalization_stat_path}")
@@ -59,7 +59,9 @@ class SpatialTokenEncoder(nn.Module):
         spatial_tokens, _ = self.encoder(images)
         z = spatial_tokens.float().permute(0, 2, 1).reshape(-1, self.channels, self.h, self.w)
         if self.do_normalization:
-            z = (z - self.latent_mean) / torch.sqrt(self.latent_var + self.eps)
+            latent_mean = self.latent_mean.to(z.device) if self.latent_mean is not None else 0
+            latent_var = self.latent_var.to(z.device) if self.latent_var is not None else 1
+            z = (z - latent_mean) / torch.sqrt(latent_var + self.eps)
         return z
 
 
