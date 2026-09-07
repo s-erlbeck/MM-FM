@@ -11,7 +11,7 @@ Usage:
     python src/scripts/compute_normalization_stats.py \
         --encoder-cls Dinov2withNorm \
         --encoder-config facebook/dinov2-with-registers-base \
-        --data-path /path/to/imagenet/train_blurred.zip \
+        --data-path /path/to/imagenet/train.zip \
         --output models/stats/dinov2/imagenet/stat.pt \
         --num-samples 50000 \
         --batch-size 64
@@ -175,7 +175,7 @@ def main():
 
     # Data settings
     parser.add_argument("--data-path", type=str, default=None,
-                        help="Path to the train_blurred.zip archive (see ImageNetDataset)")
+                        help="Path to the train.zip archive (see ImageNetDataset)")
 
     # Output settings
     parser.add_argument("--output", type=str, required=True,

@@ -7,7 +7,7 @@ ImageNet and fits a GMM for mode-conditional generation.
 
 Key features:
 - Supports any encoder via command-line arguments (SigLIP2, DINOv2, etc.)
-- Reads directly from a train_blurred.zip archive via ImageNetDataset
+- Reads directly from a train.zip archive via ImageNetDataset
 - Multi-GPU distributed extraction for faster processing
 - Sequential GMM fitting with full CPU utilization
 - Saves GMM model for use in spatial_gmm_imagenet.py
@@ -15,7 +15,7 @@ Key features:
 Usage:
     # Single GPU with SigLIP2 (default)
     python src/scripts/fit_gmm_imagenet.py \
-        --data-path /path/to/imagenet/train_blurred.zip \
+        --data-path /path/to/imagenet/train.zip \
         --config configs/stage2/training/ImageNet256/DiTDH-XL_SigLIP2-B-UNCONDITIONAL.yaml \
         --output-dir results/clustering/siglip2-base-imagenet-gmm-8192-diag \
         --n-components 8192 \
@@ -23,7 +23,7 @@ Usage:
 
     # Multi-GPU (recommended for large datasets)
     torchrun --nproc_per_node=8 src/scripts/fit_gmm_imagenet.py \
-        --data-path /path/to/imagenet/train_blurred.zip \
+        --data-path /path/to/imagenet/train.zip \
         --config configs/stage2/training/ImageNet256/DiTDH-XL_SigLIP2-B-UNCONDITIONAL.yaml \
         --output-dir results/clustering/siglip2-base-imagenet-gmm-8192-diag \
         --n-components 8192 \
@@ -31,7 +31,7 @@ Usage:
 
     # With DINOv2 encoder
     torchrun --nproc_per_node=8 src/scripts/fit_gmm_imagenet.py \
-        --data-path /path/to/imagenet/train_blurred.zip \
+        --data-path /path/to/imagenet/train.zip \
         --config configs/stage2/training/ImageNet256/DiTDH-XL_DINOv2-B-UNCONDITIONAL.yaml \
         --output-dir results/clustering/dinov2-base-imagenet-gmm-8192-diag \
         --n-components 8192 \
@@ -296,7 +296,7 @@ def main():
 
     # Data settings
     parser.add_argument("--data-path", type=str, required=True,
-                        help="Path to the train_blurred.zip archive (see ImageNetDataset)")
+                        help="Path to the train.zip archive (see ImageNetDataset)")
     parser.add_argument("--config", type=str, required=True,
                         help="Path to training config (for encoder settings)")
     parser.add_argument("--output-dir", type=str, required=True,

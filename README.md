@@ -94,13 +94,13 @@ file alongside the archive:
 
 ```
 /path/to/imagenet/
-├── train_blurred.zip   # n01440764/n01440764_10026.jpg, ... (1,281,167 images, 1,000 classes)
-├── val_blurred.zip
+├── train.zip   # n01440764/n01440764_10026.jpg, ... (1,281,167 images, 1,000 classes)
+├── val.zip
 └── map_clsloc.txt
 ```
 
 `--data-path` points directly at the zip archive, e.g.
-`/path/to/imagenet/train_blurred.zip`. No pre-resizing is needed: images are
+`/path/to/imagenet/train.zip`. No pre-resizing is needed: images are
 center-cropped to 256×256 on the fly (ADM-style `center_crop_arr`).
 
 ## GMM Training
@@ -124,7 +124,7 @@ config file.
 # With DINOv2 encoder
 uv run torchrun --standalone --nnodes=1 --nproc_per_node=8 \
   src/scripts/fit_gmm_imagenet.py \
-  --data-path /path/to/imagenet/train_blurred.zip \
+  --data-path /path/to/imagenet/train.zip \
   --config configs/stage2/training/ImageNet256/DiTDH-XL_DINOv2-B-UNCONDITIONAL.yaml \
   --output-dir results/clustering/dinov2-base-imagenet-gmm-8192-diag \
   --n-components 8192 \
@@ -134,7 +134,7 @@ uv run torchrun --standalone --nnodes=1 --nproc_per_node=8 \
 # With SigLIP2 encoder
 uv run torchrun --standalone --nnodes=1 --nproc_per_node=8 \
   src/scripts/fit_gmm_imagenet.py \
-  --data-path /path/to/imagenet/train_blurred.zip \
+  --data-path /path/to/imagenet/train.zip \
   --config configs/stage2/training/ImageNet256/DiTDH-XL_SigLIP2-B-UNCONDITIONAL.yaml \
   --output-dir results/clustering/siglip2-base-imagenet-gmm-8192-diag \
   --n-components 8192 \
@@ -152,7 +152,7 @@ uv run torchrun --standalone --nnodes=1 --nproc_per_node=8 \
 
 ```bash
 uv run python src/scripts/fit_gmm_imagenet.py \
-  --data-path /path/to/imagenet/train_blurred.zip \
+  --data-path /path/to/imagenet/train.zip \
   --config configs/stage2/training/ImageNet256/DiTDH-XL_DINOv2-B-UNCONDITIONAL.yaml \
   --cls-tokens-path results/clustering/dinov2-base-imagenet-gmm-8192-diag/cls_tokens.npz \
   --output-dir results/clustering/dinov2-base-imagenet-gmm-2048-diag \
@@ -170,7 +170,7 @@ sampling spatial latent noise during FM training.
 uv run torchrun --standalone --nnodes=1 --nproc_per_node=8 \
   src/scripts/spatial_gmm_imagenet.py \
   --cls-gmm-path results/clustering/dinov2-base-imagenet-gmm-8192-diag/gmm_n8192_diag_k-means++.pkl \
-  --data-path /path/to/imagenet/train_blurred.zip \
+  --data-path /path/to/imagenet/train.zip \
   --config configs/stage2/training/ImageNet256/DiTDH-XL_DINOv2-B-UNCONDITIONAL.yaml \
   --output-dir results/clustering/dinov2-base-imagenet-gmm-8192-diag \
   --batch-size 32
@@ -183,7 +183,7 @@ uv run torchrun --standalone --nnodes=1 --nproc_per_node=8 \
 ```bash
 uv run python src/scripts/spatial_gmm_imagenet.py \
   --cls-gmm-path results/clustering/dinov2-base-imagenet-gmm-8192-diag/gmm_n8192_diag_k-means++.pkl \
-  --data-path /path/to/imagenet/train_blurred.zip \
+  --data-path /path/to/imagenet/train.zip \
   --config configs/stage2/training/ImageNet256/DiTDH-XL_DINOv2-B-UNCONDITIONAL.yaml \
   --output-dir results/clustering/dinov2-base-imagenet-gmm-8192-diag \
   --skip-pass1
@@ -228,7 +228,7 @@ instead, update the `gmm:` paths in the config. `--wandb` is optional.
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True uv run torchrun --standalone --nnodes=1 --nproc_per_node=8 \
   src/train.py \
   --config <training_config> \
-  --data-path /path/to/imagenet/train_blurred.zip \
+  --data-path /path/to/imagenet/train.zip \
   --results-dir results/flow-matching \
   --precision bf16 \
   --wandb
@@ -257,7 +257,7 @@ Example (mode-conditional + GMM, DINOv2-B):
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True uv run torchrun --standalone --nnodes=1 --nproc_per_node=8 \
   src/train.py \
   --config configs/stage2/training/ImageNet256/DiTDH-XL_DINOv2-B-MODE-CONDITIONAL-GMM-8192-DIAG.yaml \
-  --data-path /path/to/imagenet/train_blurred.zip \
+  --data-path /path/to/imagenet/train.zip \
   --results-dir results/ditxl-mode-cond-gmm-8192-diag \
   --precision bf16 \
   --wandb
@@ -354,7 +354,7 @@ Compute position-wise variance statistics for encoder latents. This is
 uv run python src/scripts/compute_normalization_stats.py \
   --encoder-cls Dinov2withNorm \
   --encoder-config facebook/dinov2-with-registers-base \
-  --data-path /path/to/imagenet/train_blurred.zip \
+  --data-path /path/to/imagenet/train.zip \
   --output models/stats/dinov2/imagenet/stat.pt \
   --num-samples 50000 \
   --batch-size 64
@@ -370,14 +370,14 @@ the training configs.
 ```bash
 # Single GPU
 uv run python src/scripts/compute_fid_reference.py \
-  --data-path /path/to/imagenet/train_blurred.zip \
+  --data-path /path/to/imagenet/train.zip \
   --output models/fid_refs/imagenet256.npz \
   --image-size 256 \
   --num-samples 50000
 
 # Multi-GPU (faster)
 uv run torchrun --nproc_per_node=4 src/scripts/compute_fid_reference.py \
-  --data-path /path/to/imagenet/train_blurred.zip \
+  --data-path /path/to/imagenet/train.zip \
   --output models/fid_refs/imagenet256.npz \
   --image-size 256 \
   --num-samples 50000

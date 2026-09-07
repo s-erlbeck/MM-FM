@@ -12,7 +12,7 @@ Output format (NPZ file):
 Usage:
     # For ImageNetDataset (ImageNet):
     python src/scripts/compute_fid_reference.py \
-        --data-path /path/to/imagenet/train_blurred.zip \
+        --data-path /path/to/imagenet/train.zip \
         --output models/fid_refs/imagenet256.npz \
         --image-size 256 \
         --num-samples 50000 \
@@ -20,7 +20,7 @@ Usage:
 
     # For faster processing with multiple GPUs:
     torchrun --nproc_per_node=4 src/scripts/compute_fid_reference.py \
-        --data-path /path/to/imagenet/train_blurred.zip \
+        --data-path /path/to/imagenet/train.zip \
         --output models/fid_refs/imagenet256.npz \
         --num-samples 50000
 """
@@ -218,7 +218,7 @@ def main():
 
     # Data settings
     parser.add_argument("--data-path", type=str, default=None,
-                        help="Path to the train_blurred.zip archive (see ImageNetDataset)")
+                        help="Path to the train.zip archive (see ImageNetDataset)")
 
     # Output settings
     parser.add_argument("--output", type=str, required=True,

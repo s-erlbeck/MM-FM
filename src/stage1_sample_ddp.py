@@ -169,7 +169,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to the config file.")
-    parser.add_argument("--data-path", type=str, required=True, help="Path to the train/val_blurred.zip archive (see ImageNetDataset).")
+    parser.add_argument("--data-path", type=str, required=True, help="Path to the train/val.zip archive (see ImageNetDataset).")
     parser.add_argument("--sample-dir", type=str, default="samples", help="Directory to store reconstructed samples.")
     parser.add_argument("--per-proc-batch-size", type=int, default=4, help="Number of images processed per GPU step.")
     parser.add_argument("--num-samples", type=int, default=None, help="Number of samples to reconstruct (defaults to full dataset).")

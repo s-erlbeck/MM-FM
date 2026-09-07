@@ -21,14 +21,14 @@ Usage:
     # Multi-GPU (recommended)
     torchrun --nproc_per_node=8 src/scripts/spatial_gmm_imagenet.py \
         --cls-gmm-path results/clustering/siglip2-base-imagenet-gmm-8192-diag/gmm_n8192_diag_k-means++.pkl \
-        --data-path /path/to/imagenet/train_blurred.zip \
+        --data-path /path/to/imagenet/train.zip \
         --config configs/stage2/training/ImageNet256/DiTDH-XL_SigLIP2-B-UNCONDITIONAL.yaml \
         --output-dir results/clustering/siglip2-base-imagenet-gmm-8192-diag
 
     # Resume from Pass 2 (if Pass 1 completed but Pass 2 failed)
     python src/scripts/spatial_gmm_imagenet.py \
         --cls-gmm-path results/clustering/siglip2-base-imagenet-gmm-8192-diag/gmm_n8192_diag_k-means++.pkl \
-        --data-path /path/to/imagenet/train_blurred.zip \
+        --data-path /path/to/imagenet/train.zip \
         --config configs/stage2/training/ImageNet256/DiTDH-XL_SigLIP2-B-UNCONDITIONAL.yaml \
         --output-dir results/clustering/siglip2-base-imagenet-gmm-8192-diag \
         --skip-pass1
@@ -434,7 +434,7 @@ def main():
     parser.add_argument("--cls-gmm-path", type=str, required=True,
                         help="Path to CLS GMM pickle file (from fit_gmm_imagenet.py)")
     parser.add_argument("--data-path", type=str, required=True,
-                        help="Path to the train_blurred.zip archive (see ImageNetDataset)")
+                        help="Path to the train.zip archive (see ImageNetDataset)")
     parser.add_argument("--config", type=str, required=True,
                         help="Path to training config (for RAE settings)")
     parser.add_argument("--output-dir", type=str, required=True,

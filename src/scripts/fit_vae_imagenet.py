@@ -254,9 +254,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Data settings
     parser.add_argument("--data-path", type=str, required=True,
-                        help="Path to the train_blurred.zip archive (see ImageNetDataset)")
+                        help="Path to the train.zip archive (see ImageNetDataset)")
     parser.add_argument("--val-data-path", type=str, required=True,
-                        help="Path to the val_blurred.zip archive")
+                        help="Path to the val.zip archive")
     parser.add_argument("--config", type=str, required=True,
                         help="Path to training config (for encoder settings)")
     parser.add_argument("--output-dir", type=str, required=True,

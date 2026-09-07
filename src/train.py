@@ -358,7 +358,7 @@ def main(args):
     opt_state = None
 
     # ========================================================================
-    # DATA LOADING: ImageNetDataset (reads directly from a train/val_blurred.zip)
+    # DATA LOADING: ImageNetDataset (reads directly from a train/val.zip)
     # ========================================================================
     transform = transforms.Compose([
         transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.image_size)),
@@ -988,7 +988,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to the config file.")
-    parser.add_argument("--data-path", type=str, default=None, help="Path to the train_blurred.zip archive (see ImageNetDataset).")
+    parser.add_argument("--data-path", type=str, default=None, help="Path to the train.zip archive (see ImageNetDataset).")
     parser.add_argument("--results-dir", type=str, default="results", help="Directory to store training outputs.")
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256, help="Input image resolution.")
     parser.add_argument("--precision", type=str, choices=["fp32", "bf16"], default="fp32", help="Compute precision for training.")
