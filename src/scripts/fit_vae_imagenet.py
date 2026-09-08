@@ -216,7 +216,7 @@ class Trainer:
             self.optimizer.step()
 
             self.step += 1
-            for name in self.metrics.keys():
+            for name in self.metrics.keys(keep_base=True):
                 self.metrics[name].update(logs[name].expand(images.size(0)))
 
         if self.args.wandb:
