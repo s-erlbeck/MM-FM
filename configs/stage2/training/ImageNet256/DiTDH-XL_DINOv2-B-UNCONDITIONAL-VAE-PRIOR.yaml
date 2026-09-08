@@ -109,7 +109,7 @@ training:
 
 fid:
   enabled: true
-  eval_every: 12500
+  eval_every: 25000
   num_samples: 50000
   batch_size: 1
   ref_batch_path: 'artifacts/fid_reference/VIRTUAL_imagenet256_labeled.npz'
@@ -117,5 +117,5 @@ fid:
 data_limit:
   enabled: false           # Set to true to enable data limiting
   sample_percentage: 0.1   # Percentage of samples to use per kept class (0.0-1.0)
-  class_percentage: 1.0    # Percentage of classes to keep (0.0-1.0)
+  class_percentage: 0.2    # Percentage of classes to keep (0.0-1.0)
   seed: 42                 # Random seed for reproducible sampling
