@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchmetrics import CosineSimilarity, MeanAbsoluteError, MeanMetric, MeanSquaredError
+from torchmetrics import MeanAbsoluteError, MeanMetric, MeanSquaredError, MetricCollection
 from torchvision import transforms
 from tqdm import tqdm
 from PIL import Image
@@ -57,7 +57,9 @@ class SpatialTokenEncoder(nn.Module):
     @torch.no_grad()
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         spatial_tokens, _ = self.encoder(images)
-        z = spatial_tokens.float().permute(0, 2, 1).reshape(-1, self.channels, self.h, self.w)
+        # the reshape only splits the token dim, so it stays a view of the permuted tensor
+        # make it contiguous here once else torchmetrics crashes
+        z = spatial_tokens.float().permute(0, 2, 1).reshape(-1, self.channels, self.h, self.w).contiguous()
         if self.do_normalization:
             latent_mean = self.latent_mean.to(z.device) if self.latent_mean is not None else 0
             latent_var = self.latent_var.to(z.device) if self.latent_var is not None else 1
@@ -179,90 +181,121 @@ def save_checkpoint(path: str, vae: PatchTokenVAE, optimizer: torch.optim.Optimi
     print(f"Saved checkpoint: {path}")
 
 
-def train_one_epoch(vae: PatchTokenVAE, encoder: SpatialTokenEncoder, dataloader: DataLoader,
-                     optimizer: torch.optim.Optimizer, device: torch.device,
-                     args: argparse.Namespace, epoch: int, step: int) -> int:
-    vae.train()
-    amp_dtype = torch.bfloat16 if args.precision == 'bf16' else torch.float32
-    use_amp = args.precision == 'bf16'
+class Trainer:
+    """Runs the VAE training epochs."""
 
-    metrics = {name: MeanMetric().to(device) for name in ("loss", "rec_loss", "kl_loss")}
+    def __init__(self, vae: PatchTokenVAE, encoder: SpatialTokenEncoder, dataloader: DataLoader,
+                 optimizer: torch.optim.Optimizer, device: torch.device, args: argparse.Namespace):
+        self.vae = vae
+        self.encoder = encoder
+        self.dataloader = dataloader
+        self.optimizer = optimizer
+        self.device = device
+        self.args = args
+        self.amp_dtype = torch.bfloat16 if args.precision == 'bf16' else torch.float32
+        self.use_amp = args.precision == 'bf16'
+        self.step = 0
+        self.metrics = MetricCollection({name: MeanMetric() for name in ("loss", "rec_loss", "kl_loss")},
+                                        prefix="train/", compute_groups=False)
+        self.metrics.to(device)
 
-    pbar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}")
-    for images, _ in pbar:
-        images = images.to(device, non_blocking=True)
+    def train_one_epoch(self, epoch: int):
+        self.vae.train()
+        self.metrics.reset()
 
-        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-            patch_grid = encoder(images)
-            loss, logs = vae.loss(patch_grid, kl_weight=args.kl_weight)
+        pbar = tqdm(self.dataloader, desc=f"Epoch {epoch + 1}/{self.args.epochs}")
+        for images, _ in pbar:
+            images = images.to(self.device, non_blocking=True)
 
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
+            with torch.autocast(device_type=self.device.type, dtype=self.amp_dtype, enabled=self.use_amp):
+                patch_grid = self.encoder(images)
+                loss, logs = self.vae.loss(patch_grid, kl_weight=self.args.kl_weight)
 
-        step += 1
-        for name, metric in metrics.items():
-            metric.update(logs[name].expand(images.size(0)))
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            self.optimizer.step()
 
-    epoch_stats = {name: metric.compute().item() for name, metric in metrics.items()}
-    if args.wandb:
-        wandb_utils.log({f"train/{key}": value for key, value in epoch_stats.items()}, step=epoch + 1)
+            self.step += 1
+            for name in self.metrics.keys():
+                self.metrics[name].update(logs[name].expand(images.size(0)))
 
-    return step
+        if self.args.wandb:
+            wandb_utils.log({key: value.item() for key, value in self.metrics.compute().items()},
+                            step=epoch + 1)
 
 
-@torch.no_grad()
-def validate_one_epoch(vae: PatchTokenVAE, encoder: SpatialTokenEncoder, dataloader: DataLoader,
-                       device: torch.device, args: argparse.Namespace, epoch: int, step: int) -> int:
-    vae.eval()
-    amp_dtype = torch.bfloat16 if args.precision == 'bf16' else torch.float32
-    use_amp = args.precision == 'bf16'
+class Validator:
+    """Runs the VAE validation epochs."""
 
-    loss_metrics = {name: MeanMetric().to(device) for name in ("loss", "rec_loss", "kl_loss")}
-    mse_metric = MeanSquaredError().to(device)
-    mae_metric = MeanAbsoluteError().to(device)
-    cos_sim_metric = CosineSimilarity(reduction="mean").to(device)
+    def __init__(self, vae: PatchTokenVAE, encoder: SpatialTokenEncoder, dataloader: DataLoader,
+                 device: torch.device, args: argparse.Namespace):
+        self.vae = vae
+        self.encoder = encoder
+        self.dataloader = dataloader
+        self.device = device
+        self.args = args
+        self.amp_dtype = torch.bfloat16 if args.precision == 'bf16' else torch.float32
+        self.use_amp = args.precision == 'bf16'
+        self.step = 0
+        # torchmetrics' CosineSimilarity concats all values, requiring >10 GB
+        # therefore use MeanMetric instead (completely equivalent)
+        self.metrics = MetricCollection(
+            {
+                "loss": MeanMetric(),
+                "rec_loss": MeanMetric(),
+                "kl_loss": MeanMetric(),
+                "cos_sim": MeanMetric(),
+                "mse": MeanSquaredError(),
+                "mae": MeanAbsoluteError(),
+            },
+            prefix="val/", compute_groups=False,
+        )
+        self.metrics.to(device)
 
-    pbar = tqdm(dataloader, desc=f"Validation {epoch + 1}/{args.epochs}")
-    for images, _ in pbar:
-        images = images.to(device, non_blocking=True)
+    @torch.no_grad()
+    def validate_one_epoch(self, epoch: int):
+        self.vae.eval()
+        self.metrics.reset()
 
-        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-            patch_grid = encoder(images)
-            # loss terms use a sampled latent, to stay comparable to training
-            x_rec, posterior = vae(patch_grid)
-            rec_loss = F.mse_loss(x_rec, patch_grid)
-            kl_loss = posterior.kl().mean()
-            loss = rec_loss + args.kl_weight * kl_loss
-            # reconstruction metrics use the posterior mode, i.e. without sampling noise
-            x_rec_mode = vae.decode(posterior.mode())
+        pbar = tqdm(self.dataloader, desc=f"Validation {epoch + 1}/{self.args.epochs}")
+        for images, _ in pbar:
+            images = images.to(self.device, non_blocking=True)
 
-        step += 1
-        loss_metrics["loss"].update(loss.expand(images.size(0)))
-        loss_metrics["rec_loss"].update(rec_loss.expand(images.size(0)))
-        loss_metrics["kl_loss"].update(kl_loss.expand(images.size(0)))
-        mse_metric.update(x_rec_mode.contiguous(), patch_grid.contiguous())
-        mae_metric.update(x_rec_mode.contiguous(), patch_grid.contiguous())
-        cos_sim_metric.update(x_rec_mode.flatten(1), patch_grid.flatten(1))
+            with torch.autocast(device_type=self.device.type, dtype=self.amp_dtype, enabled=self.use_amp):
+                patch_grid = self.encoder(images)
+                # loss terms use a sampled latent, to stay comparable to training
+                x_rec, posterior = self.vae(patch_grid)
+                rec_loss = F.mse_loss(x_rec, patch_grid)
+                kl_loss = posterior.kl().mean()
+                loss = rec_loss + self.args.kl_weight * kl_loss
+                # reconstruction metrics use the posterior mode, i.e. without sampling noise
+                x_rec_mode = self.vae.decode(posterior.mode())
 
-    epoch_stats = {name: metric.compute().item() for name, metric in loss_metrics.items()}
-    epoch_stats["mse"] = mse_metric.compute().item()
-    epoch_stats["mae"] = mae_metric.compute().item()
-    epoch_stats["cos_sim"] = cos_sim_metric.compute().item()
-    if args.wandb:
-        wandb_utils.log({f"val/{key}": value for key, value in epoch_stats.items()}, step=epoch + 1)
+            self.step += 1
+            # cannot use MetricCollections update because of different parameters for each metric
+            self.metrics["loss"].update(loss.expand(images.size(0)))
+            self.metrics["rec_loss"].update(rec_loss.expand(images.size(0)))
+            self.metrics["kl_loss"].update(kl_loss.expand(images.size(0)))
+            # metrics in float
+            pred, target = x_rec_mode.float(), patch_grid.float()
+            self.metrics["mse"].update(pred, target)
+            self.metrics["mae"].update(pred, target)
+            self.metrics["cos_sim"].update(F.cosine_similarity(pred.flatten(1), target.flatten(1), dim=1))
 
-    return step
+        if self.args.wandb:
+            wandb_utils.log({key: value.item() for key, value in self.metrics.compute().items()},
+                            step=epoch + 1)
 
 
 def train(vae: PatchTokenVAE, encoder: SpatialTokenEncoder, train_loader: DataLoader, val_loader: DataLoader,
           optimizer: torch.optim.Optimizer, device: torch.device, args: argparse.Namespace):
-    step = 0
-    val_step = 0
+    trainer = Trainer(vae, encoder, train_loader, optimizer, device, args)
+    validator = Validator(vae, encoder, val_loader, device, args)
     for epoch in range(args.epochs):
-        step = train_one_epoch(vae, encoder, train_loader, optimizer, device, args, epoch, step)
-        val_step = validate_one_epoch(vae, encoder, val_loader, device, args, epoch, val_step)
-        save_checkpoint(os.path.join(args.output_dir, f"vae_epoch{epoch + 1}.pt"), vae, optimizer, epoch + 1, step, args)
+        trainer.train_one_epoch(epoch)
+        validator.validate_one_epoch(epoch)
+        save_checkpoint(os.path.join(args.output_dir, f"vae_epoch{epoch + 1}.pt"), vae, optimizer,
+                        epoch + 1, trainer.step, args)
 
     final_path = os.path.join(args.output_dir, "vae_final.pt")
     torch.save({"model": vae.state_dict(), "args": vars(args)}, final_path)
