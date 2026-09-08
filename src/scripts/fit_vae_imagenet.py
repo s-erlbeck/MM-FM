@@ -21,10 +21,10 @@ if src_path not in sys.path:
     sys.path.insert(0, src_path)
 
 from stage1.encoders import ARCHS
+from stage2.models.vae import PatchTokenVAE
 from transformers import AutoImageProcessor
 from utils import wandb_utils
 from utils.data_utils import ClassBalancedSubset, ImageNetDataset
-from vae import PatchTokenVAE
 
 
 class SpatialTokenEncoder(nn.Module):

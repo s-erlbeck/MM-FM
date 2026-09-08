@@ -1,4 +1,5 @@
 from .transport import Transport, ModelType, WeightType, PathType, Sampler
+from .prior import VAEPriorSampler, sample_prior_noise
 
 def create_transport(
     path_type='Linear',
@@ -9,6 +10,7 @@ def create_transport(
     time_dist_type="uniform",
     time_dist_shift=1.0,
     gmm_sampler=None,
+    vae_sampler=None,
 ):
     """function for creating Transport object
     **Note**: model prediction defaults to velocity
@@ -21,6 +23,7 @@ def create_transport(
     - time_dist_type: type of time distribution to use; default to uniform
     - time_dist_shift: shift for time distribution; default to 1.0
     - gmm_sampler: GMMSampler object for noise sampling (optional)
+    - vae_sampler: VAEPriorSampler object for noise sampling (optional, exclusive with gmm_sampler)
     """
 
     if prediction == "noise":
@@ -65,6 +68,7 @@ def create_transport(
         train_eps=train_eps,
         sample_eps=sample_eps,
         gmm_sampler=gmm_sampler,
+        vae_sampler=vae_sampler,
     )
 
     return state

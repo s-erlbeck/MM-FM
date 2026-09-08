@@ -14,6 +14,8 @@ from torch.cuda.amp import autocast
 from scipy import linalg
 from tqdm import tqdm as tqdm_std
 
+from stage2.transport import sample_prior_noise
+
 
 #################################################################################
 #                        FID Evaluation (PyTorch-based)                         #
@@ -152,6 +154,7 @@ def evaluate_fid(
     enable_wandb: bool,
     latent_size: tuple,
     gmm_sampler=None,
+    vae_sampler=None,
     num_classes: int = 1000,
     null_label: int = 1000,
     world_size: int = 1,
@@ -180,6 +183,7 @@ def evaluate_fid(
         enable_wandb: Whether to log to wandb
         latent_size: Size of latent space (C, H, W)
         gmm_sampler: GMMSampler for noise sampling (optional)
+        vae_sampler: VAEPriorSampler for noise sampling (optional, exclusive with gmm_sampler)
         num_classes: Number of classes
         null_label: Null label for unconditional generation
         world_size: Number of GPUs for distributed sampling
@@ -290,7 +294,8 @@ def evaluate_fid(
                     y = device_pool[start_idx:end_idx]
 
                     # Sample noise from GMM (required for mode-conditional)
-                    zs, _ = gmm_sampler.sample(y, latent_size, device, latent_dtype)
+                    zs = sample_prior_noise(current_batch_size, latent_size, device, latent_dtype,
+                                            gmm_sampler=gmm_sampler, gmm_labels=y, generator=generator)
                     batch_kwargs = {**sample_model_kwargs, 'y': y}
 
                 else:
@@ -301,15 +306,10 @@ def evaluate_fid(
 
                     if using_cfg:
                         # CFG: duplicate noise and labels
-                        if gmm_sampler is not None:
-                            # GMM + CLASS-CONDITIONAL with CFG
-                            modes_cond = gmm_sampler.sample_modes_weighted(current_batch_size, device, generator=generator)
-                            modes_uncond = gmm_sampler.sample_modes_weighted(current_batch_size, device, generator=generator)
-                            zs_cond, _ = gmm_sampler.sample(modes_cond, latent_size, device, latent_dtype)
-                            zs_uncond, _ = gmm_sampler.sample(modes_uncond, latent_size, device, latent_dtype)
-                        else:
-                            zs_cond = torch.randn(current_batch_size, *latent_size, device=device, dtype=latent_dtype, generator=generator)
-                            zs_uncond = torch.randn(current_batch_size, *latent_size, device=device, dtype=latent_dtype, generator=generator)
+                        prior_kwargs = dict(gmm_sampler=gmm_sampler, vae_sampler=vae_sampler,
+                                            generator=generator)
+                        zs_cond = sample_prior_noise(current_batch_size, latent_size, device, latent_dtype, **prior_kwargs)
+                        zs_uncond = sample_prior_noise(current_batch_size, latent_size, device, latent_dtype, **prior_kwargs)
                         zs = torch.cat([zs_cond, zs_uncond], dim=0)
 
                         y_null = torch.full((current_batch_size,), null_label, device=device)
@@ -317,23 +317,16 @@ def evaluate_fid(
                         batch_kwargs = {**sample_model_kwargs, 'y': y}
                     else:
                         # No CFG
-                        if gmm_sampler is not None:
-                            # GMM + CLASS-CONDITIONAL without CFG
-                            modes_for_noise = gmm_sampler.sample_modes_weighted(current_batch_size, device, generator=generator)
-                            zs, _ = gmm_sampler.sample(modes_for_noise, latent_size, device, latent_dtype)
-                        else:
-                            zs = torch.randn(current_batch_size, *latent_size, device=device, dtype=latent_dtype, generator=generator)
+                        zs = sample_prior_noise(current_batch_size, latent_size, device, latent_dtype,
+                                                gmm_sampler=gmm_sampler, vae_sampler=vae_sampler,
+                                                generator=generator)
                         batch_kwargs = {**sample_model_kwargs, 'y': y_cond}
 
             else:
                 # UNCONDITIONAL
-                if gmm_sampler is not None:
-                    # UNCOND-GMM: sample modes for noise, model ignores labels
-                    modes = gmm_sampler.sample_modes_weighted(current_batch_size, device, generator=generator)
-                    zs, _ = gmm_sampler.sample(modes, latent_size, device, latent_dtype)
-                else:
-                    # Pure unconditional: isotropic Gaussian
-                    zs = torch.randn(current_batch_size, *latent_size, device=device, dtype=latent_dtype, generator=generator)
+                zs = sample_prior_noise(current_batch_size, latent_size, device, latent_dtype,
+                                        gmm_sampler=gmm_sampler, vae_sampler=vae_sampler,
+                                        generator=generator)
 
                 # Inherit autoguidance params from sample_model_kwargs (y=None for unconditional)
                 batch_kwargs = {**sample_model_kwargs}

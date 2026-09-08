@@ -135,7 +135,7 @@ def main(args):
     autocast_kwargs = dict(dtype=torch.bfloat16, enabled=use_bf16)
     latent_dtype = torch.bfloat16 if use_bf16 else torch.float32
 
-    # Parse config (11 return values)
+    # Parse config (12 return values)
     (
         rae_config,
         model_config,
@@ -148,10 +148,19 @@ def main(args):
         fid_config,
         data_limit_config,
         data_config,  # WebDataset config (unused in sampling)
+        vae_prior_config,
     ) = parse_configs(args.config)
 
     if rae_config is None or model_config is None:
         raise ValueError("Config must provide both stage_1 and stage_2 entries.")
+
+    # The VAE prior is only wired into train.py / evaluate_fid so far. Sampling a
+    # prior-trained model from N(0, I) produces garbage that looks like a training failure.
+    if vae_prior_config is not None and vae_prior_config.get("enabled", False):
+        raise NotImplementedError(
+            "vae_prior.enabled is not supported by sample_ddp.py yet. Use the in-training "
+            "FID evaluation (fid.enabled) instead."
+        )
 
     misc = {} if misc_config is None else dict(misc_config)
     gmm_cfg = {} if gmm_config is None else dict(gmm_config)

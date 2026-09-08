@@ -30,7 +30,7 @@ from torch.cuda.amp import autocast
 from omegaconf import OmegaConf
 from stage1 import RAE
 from stage2.models import Stage2ModelProtocol
-from stage2.transport import create_transport, Sampler
+from stage2.transport import create_transport, Sampler, VAEPriorSampler, sample_prior_noise
 from stage2.transport.gmm_sampler import GMMSampler
 from stage2.transport.adaptive_weighter import AdaptiveClassWeighter
 from utils.train_utils import parse_configs
@@ -138,6 +138,7 @@ def main(args):
         fid_config,
         data_limit_config,
         data_config,
+        vae_prior_config,
     ) = parse_configs(args.config)
 
     if rae_config is None or model_config is None:
@@ -157,6 +158,7 @@ def main(args):
     fid_cfg = to_dict(fid_config)
     data_limit_cfg = to_dict(data_limit_config)
     data_cfg = to_dict(data_config)
+    vae_prior_cfg = to_dict(vae_prior_config)
 
     # Validate --data-path is provided (ImageNetDataset is the only supported data source)
     if args.data_path is None:
@@ -483,6 +485,13 @@ def main(args):
         )
         logger.info(f"GMM sampler initialized: mode_conditional={use_mode_conditional}, cls_enabled={cls_enabled}")
 
+    # Initialize VAE prior sampler if enabled
+    if vae_prior_cfg.get('enabled', False) and use_gmm:
+        raise ValueError("gmm.enabled and vae_prior.enabled are mutually exclusive.")
+    vae_sampler = VAEPriorSampler.from_config(vae_prior_cfg, latent_size, device, verbose=(rank == 0))
+    if vae_sampler is not None and rank == 0:
+        logger.info(f"VAE prior marginal diagnostics: {vae_sampler.diagnose()}")
+
     # Check model conditioning
     use_y_conditioning = is_model_conditional(model)
     logger.info(f"Model conditioning: use_y_conditioning={use_y_conditioning}")
@@ -510,6 +519,7 @@ def main(args):
         **transport_params,
         time_dist_shift=time_dist_shift,
         gmm_sampler=gmm_sampler,
+        vae_sampler=vae_sampler,
     )
     transport_sampler = Sampler(transport)
 
@@ -563,7 +573,8 @@ def main(args):
             n = ys.size(0)
 
             # Sample noise from GMM (required for mode-conditional)
-            zs, _ = gmm_sampler.sample(ys, latent_size, device, latent_dtype)
+            zs = sample_prior_noise(n, latent_size, device, latent_dtype,
+                                    gmm_sampler=gmm_sampler, gmm_labels=ys)
 
             # Autoguidance support
             if guidance_method == "autoguidance" and guid_model_forward is not None:
@@ -588,15 +599,9 @@ def main(args):
 
             if using_cfg:
                 # CFG: duplicate noise and labels
-                if gmm_sampler is not None:
-                    # GMM + CLASS-CONDITIONAL with CFG
-                    modes_cond = gmm_sampler.sample_modes_weighted(n, device)
-                    zs_cond, _ = gmm_sampler.sample(modes_cond, latent_size, device, latent_dtype)
-                    modes_uncond = gmm_sampler.sample_modes_weighted(n, device)
-                    zs_uncond, _ = gmm_sampler.sample(modes_uncond, latent_size, device, latent_dtype)
-                else:
-                    zs_cond = torch.randn(n, *latent_size, device=device, dtype=latent_dtype)
-                    zs_uncond = torch.randn(n, *latent_size, device=device, dtype=latent_dtype)
+                prior_kwargs = dict(gmm_sampler=gmm_sampler, vae_sampler=vae_sampler)
+                zs_cond = sample_prior_noise(n, latent_size, device, latent_dtype, **prior_kwargs)
+                zs_uncond = sample_prior_noise(n, latent_size, device, latent_dtype, **prior_kwargs)
                 zs = torch.cat([zs_cond, zs_uncond], dim=0)
 
                 y_null = torch.full((n,), null_label, device=device)
@@ -616,12 +621,8 @@ def main(args):
                     model_fn = ema.forward_with_cfg
             else:
                 # No CFG
-                if gmm_sampler is not None:
-                    # GMM + CLASS-CONDITIONAL without CFG
-                    modes_for_noise = gmm_sampler.sample_modes_weighted(n, device)
-                    zs, _ = gmm_sampler.sample(modes_for_noise, latent_size, device, latent_dtype)
-                else:
-                    zs = torch.randn(n, *latent_size, device=device, dtype=latent_dtype)
+                zs = sample_prior_noise(n, latent_size, device, latent_dtype,
+                                        gmm_sampler=gmm_sampler, vae_sampler=vae_sampler)
 
                 if guidance_method == "autoguidance" and guid_model_forward is not None:
                     sample_model_kwargs = dict(
@@ -642,14 +643,9 @@ def main(args):
         n = micro_batch_size
         using_cfg = False  # CFG requires conditional model
 
-        # Noise source: GMM (if enabled) or isotropic Gaussian
-        if gmm_sampler is not None:
-            # UNCOND-GMM: sample modes for GMM noise, but model ignores them
-            modes = gmm_sampler.sample_modes_weighted(n, device)
-            zs, _ = gmm_sampler.sample(modes, latent_size, device, latent_dtype)
-        else:
-            # Pure unconditional: isotropic Gaussian
-            zs = torch.randn(n, *latent_size, device=device, dtype=latent_dtype)
+        # Noise source: GMM / VAE prior (if enabled) or isotropic Gaussian
+        zs = sample_prior_noise(n, latent_size, device, latent_dtype,
+                                gmm_sampler=gmm_sampler, vae_sampler=vae_sampler)
 
         # Autoguidance support
         if guidance_method == "autoguidance" and guid_model_forward is not None:
@@ -960,6 +956,7 @@ def main(args):
                     enable_wandb=args.wandb,
                     latent_size=latent_size,
                     gmm_sampler=gmm_sampler,
+                    vae_sampler=vae_sampler,
                     num_classes=num_classes,
                     null_label=null_label,
                     world_size=world_size,

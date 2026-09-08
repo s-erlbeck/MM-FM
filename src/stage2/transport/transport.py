@@ -97,6 +97,7 @@ class Transport:
         train_eps,
         sample_eps,
         gmm_sampler=None,
+        vae_sampler=None,
     ):
         path_options = {
             PathType.LINEAR: path.ICPlan,
@@ -112,12 +113,17 @@ class Transport:
         self.path_sampler = path_options[path_type]()
         self.train_eps = train_eps
         self.sample_eps = sample_eps
+        if gmm_sampler is not None and vae_sampler is not None:
+            raise ValueError("The flow has one source distribution: pass gmm_sampler or vae_sampler.")
         self.gmm_sampler = gmm_sampler
+        self.vae_sampler = vae_sampler
 
     def prior_logp(self, z):
         '''
             Standard multivariate normal prior
             Assume z is batched
+
+            NOTE: invalid under the GMM and VAE priors, which are not the standard normal.
         '''
         shape = th.tensor(z.size())
         N = th.prod(shape[1:])
@@ -169,9 +175,17 @@ class Transport:
         # Priority: y_gmm > y (backward compatible)
         gmm_labels = y_gmm if y_gmm is not None else y
 
-        # Sample noise using GMM or isotropic Gaussian
+        # Sample noise using the GMM, the VAE prior, or an isotropic Gaussian
         if self.gmm_sampler is not None and gmm_labels is not None:
             x0, _ = self.gmm_sampler.sample(gmm_labels, x1.shape[1:], x1.device, x1.dtype)
+        elif self.vae_sampler is not None:
+            if self.vae_sampler.coupled:
+                # z ~ q(z|x1): coupled to *this* x1. y / y_gmm are deliberately unused --
+                # the coupling comes from x1 itself, not from labels.
+                x0 = self.vae_sampler.sample_coupled(x1)
+            else:
+                # Ablation: uncoupled, i.e. the same marginal the inference paths use.
+                x0 = self.vae_sampler.sample(batch_size, x1.device, x1.dtype)
         else:
             x0 = th.randn_like(x1)
 
