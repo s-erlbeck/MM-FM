@@ -26,7 +26,7 @@ from fit_vae_imagenet import center_crop_arr
 from stage1 import RAE
 from stage2.transport import create_transport, Sampler
 from stage2.transport.prior import load_patch_token_vae
-from utils.data_utils import ImageNetDataset
+from utils.data_utils import ClassBalancedSubset, ImageNetDataset
 from utils.model_utils import instantiate_from_config
 from utils.train_utils import parse_configs
 
@@ -67,6 +67,14 @@ def main() -> None:
     parser.add_argument("--prior", choices=["posterior", "gaussian"], default="posterior",
                         help="Sample VAE latents from the posterior q(z, x_1) (default) or "
                              "the uninformative VAE prior N(z; 0, I).")
+    parser.add_argument("--data-limit-sample-percentage", type=float, default=1.0,
+                        help="Percentage of samples to use per kept class (0.0-1.0, default: 1.0). "
+                             "Match the VAE's training data limits to only look at in-domain images.")
+    parser.add_argument("--data-limit-class-percentage", type=float, default=1.0,
+                        help="Percentage of classes to keep (0.0-1.0, default: 1.0). "
+                             "Match the VAE's training data limits to only look at in-domain images.")
+    parser.add_argument("--data-limit-seed", type=int, default=42,
+                        help="Random seed for data limiting (default: 42). Match the VAE's training seed.")
     args = parser.parse_args()
 
     device = get_device()
@@ -97,6 +105,16 @@ def main() -> None:
         transforms.ToTensor(),
     ])
     dataset = ImageNetDataset(args.data_path, transform=transform)
+    if args.data_limit_sample_percentage < 1.0 or args.data_limit_class_percentage < 1.0:
+        original_size = len(dataset)
+        dataset = ClassBalancedSubset(
+            dataset,
+            sample_percentage=args.data_limit_sample_percentage,
+            class_percentage=args.data_limit_class_percentage,
+            seed=args.data_limit_seed,
+        )
+        print(f"Dataset reduced from {original_size:,} to {len(dataset):,} samples "
+              f"(seed={args.data_limit_seed})")
     num_images = min(args.num_images, len(dataset))
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
