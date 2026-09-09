@@ -12,10 +12,10 @@ import os
 import sys
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 from torchvision import transforms
-from torchvision.utils import make_grid, save_image
 
 # Add src to path
 src_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -117,14 +117,26 @@ def main() -> None:
 
         recon_shape = (rae.decoder_output_size, rae.decoder_output_size)
         panels = [F.interpolate(image, size=recon_shape, mode="bilinear", align_corners=False)]
+        panel_labels = ["original"]
         for i, name in enumerate(variant_names):
             panels.append(rae.decode(std0_by_variant[name]))
+            panel_labels.append(f"{name}\nstd0")
             panels.append(rae.decode(std1_by_variant[name]))
+            panel_labels.append(f"{name}\nstd1")
             panels.append(rae.decode(transported[i:i + 1]))
+            panel_labels.append(f"{name}\ntransported")
 
-        grid = make_grid(torch.cat(panels, dim=0).clamp(0.0, 1.0), nrow=len(panels))
         out_path = args.output_dir / f"{idx:03d}_cls{label}.png"
-        save_image(grid, out_path)
+        fig, axes = plt.subplots(1, len(panels), figsize=(2.5 * len(panels), 2.75))
+        for ax, panel, panel_label in zip(axes, panels, panel_labels):
+            img = panel.clamp(0.0, 1.0)[0].permute(1, 2, 0).cpu().numpy()
+            ax.imshow(img)
+            ax.set_title(panel_label, fontsize=9)
+            ax.axis("off")
+        fig.suptitle(f"idx={idx} cls={label}")
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
         print(f"[{idx + 1}/{num_images}] saved {out_path}")
 
 
