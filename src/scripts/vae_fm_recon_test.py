@@ -115,7 +115,7 @@ def main() -> None:
         x0_batch = torch.cat([std0_by_variant[name] for name in variant_names], dim=0)
         transported = sample_fn(x0_batch, model.forward)[-1]
 
-        recon_shape = std0_by_variant[variant_names[0]].shape[-2:]
+        recon_shape = (rae.decoder_output_size, rae.decoder_output_size)
         panels = [F.interpolate(image, size=recon_shape, mode="bilinear", align_corners=False)]
         for i, name in enumerate(variant_names):
             panels.append(rae.decode(std0_by_variant[name]))
