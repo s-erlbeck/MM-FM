@@ -64,6 +64,9 @@ def main() -> None:
     parser.add_argument("--num-images", type=int, default=10)
     parser.add_argument("--output-dir", type=Path, default=Path("vae_fm_recon_out"))
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--prior", choices=["posterior", "gaussian"], default="posterior",
+                        help="Sample VAE latents from the posterior q(z, x_1) (default) or "
+                             "the uninformative VAE prior N(z; 0, I).")
     args = parser.parse_args()
 
     device = get_device()
@@ -104,7 +107,13 @@ def main() -> None:
         dist = vae.encode(x1.float())
 
         variant_names = ["mode", "sample"]
-        z_by_variant = {"mode": dist.mode(), "sample": dist.sample()}
+        if args.prior == "posterior":
+            z_by_variant = {"mode": dist.mode(), "sample": dist.sample()}
+        else:
+            z_by_variant = {
+                "mode": torch.zeros_like(dist.mode()),
+                "sample": torch.randn_like(dist.mode()),
+            }
         std0_by_variant = {name: vae.decode(z_by_variant[name]) for name in variant_names}
         std1_by_variant = {
             name: std0_by_variant[name] + torch.randn_like(std0_by_variant[name])
@@ -116,8 +125,13 @@ def main() -> None:
         transported = sample_fn(x0_batch, model.forward)[-1]
 
         recon_shape = (rae.decoder_output_size, rae.decoder_output_size)
-        panels = [F.interpolate(image, size=recon_shape, mode="bilinear", align_corners=False)]
-        panel_labels = ["original"]
+        if args.prior == "posterior":
+            panels = [F.interpolate(image, size=recon_shape, mode="bilinear", align_corners=False)]
+            panel_labels = ["original"]
+        else:
+            panels = [torch.zeros(1, 3, *recon_shape, device=device)]
+            panel_labels = ["unconditional prior"]
+
         for i, name in enumerate(variant_names):
             panels.append(rae.decode(std0_by_variant[name]))
             panel_labels.append(f"{name}\nstd0")
