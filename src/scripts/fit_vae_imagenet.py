@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 from torch.utils.data import DataLoader
 from torchmetrics import MeanAbsoluteError, MeanMetric, MeanSquaredError, MetricCollection
 from torchvision import transforms
@@ -313,7 +314,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=str, required=True,
                         help="Path to training config (for encoder settings)")
     parser.add_argument("--output-dir", type=str, required=True,
-                        help="Directory to save model and results")
+                        help="Parent directory to save model and results")
 
     # Processing settings
     parser.add_argument("--batch-size", type=int, default=64,
@@ -373,16 +374,20 @@ def main():
     if isinstance(train_loader.dataset, ClassBalancedSubset):
         assert train_loader.dataset.selected_classes == val_loader.dataset.selected_classes
 
+    if args.wandb:
+        if wandb.api.api_key is None:
+            wandb.login(key=os.environ["WANDB_API_KEY"])
+        run = wandb.init(entity="plankton-diffusion", project="mm-fm", config=vars(args))
+        # let wandb assign human-readable name
+        # use that name as output dir to resolve collisions
+        args.output_dir = os.path.join(args.output_dir, run.name or run.id)
+        if "SLURM_JOB_ID" in os.environ:
+            print(f"Running Slurm job {os.environ["SLURM_JOB_ID"]}")
+
     os.makedirs(args.output_dir, exist_ok=True)
 
     vae = build_vae(args, encoder.channels, device)
     optimizer = torch.optim.AdamW(vae.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-
-    if args.wandb:
-        exp_name = os.path.basename(os.path.normpath(args.output_dir))
-        wandb_utils.initialize(args, "plankton-diffusion", exp_name, "mm-fm")
-        if "SLURM_JOB_ID" in os.environ:
-            print(f"Running Slurm job {os.environ["SLURM_JOB_ID"]}")
 
     train(vae, encoder, train_loader, val_loader, optimizer, device, args)
 
