@@ -63,7 +63,7 @@ gmm:
 # Training draws z ~ q(z|x1) (coupled to each image), inference draws z ~ N(0, I).
 vae_prior:
   enabled: true
-  ckpt_path: 'artifacts/vae/dinov2-b/vae_final.pt'
+  ckpt_path: '/home/erlbeck/project_dir/personal/erlbeck/output/mm-fm/ckpt/vae/dinov2-beta_e-6/vae_final.pt'
 
   # p(x0|z) = N(decode(z), decoder_std^2 I). 0.0 => x0 = decode(z), with all coupling
   # stochasticity coming from z ~ q(z|x1). The MLE scale for this is sqrt(val/rec_loss)
