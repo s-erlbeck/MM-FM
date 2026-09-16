@@ -142,6 +142,7 @@ def main() -> None:
         x0_batch = torch.cat([std0_by_variant[name] for name in variant_names], dim=0)
         transported = sample_fn(x0_batch, model.forward)[-1]
 
+        # original image (in case of reconstruction, else zeros)
         recon_shape = (rae.decoder_output_size, rae.decoder_output_size)
         if args.prior == "posterior":
             panels = [F.interpolate(image, size=recon_shape, mode="bilinear", align_corners=False)]
