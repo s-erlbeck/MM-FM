@@ -63,12 +63,12 @@ gmm:
 # Training draws z ~ q(z|x1) (coupled to each image), inference draws z ~ N(0, I).
 vae_prior:
   enabled: true
-  ckpt_path: '/home/erlbeck/project_dir/personal/erlbeck/output/mm-fm/ckpt/vae/dinov2/toasty-haze-5/vae_final.pt'
+  ckpt_path: '/home/erlbeck/project_dir/personal/erlbeck/output/mm-fm/ckpt/vae/dinov2/deep-spaceship-7/vae_final.pt'
 
   # p(x0|z) = N(decode(z), decoder_std^2 I). 0.0 => x0 = decode(z), with all coupling
   # stochasticity coming from z ~ q(z|x1). The MLE scale for this is sqrt(val/rec_loss)
   # of the VAE fit.
-  decoder_std: 2.0
+  decoder_std: 0.69
 
   # true  : training draws z ~ q(z|x1)  (coupled to each image)
   # false : training draws z ~ N(0, I)  (uncoupled ablation; matches inference)
@@ -108,14 +108,14 @@ training:
   clip_grad: 1.0
 
 fid:
-  enabled: true
+  enabled: false
   eval_every: 25000
   num_samples: 50000
   batch_size: 1
   ref_batch_path: 'artifacts/fid_reference/VIRTUAL_imagenet256_labeled.npz'
 
 data_limit:
-  enabled: false           # Set to true to enable data limiting
+  enabled: true            # Set to true to enable data limiting
   sample_percentage: 0.1   # Percentage of samples to use per kept class (0.0-1.0)
   class_percentage: 0.2    # Percentage of classes to keep (0.0-1.0)
   seed: 42                 # Random seed for reproducible sampling
