@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
 Sanity-check the VAE-as-flow-source pipeline on real images:
-RAE.encode -> VAE.encode/decode (two decoder_std levels, two encode modes) -> FM
-transport -> RAE.decode. Saves one grid image per input.
+Renders 5 images: 
+1. original x_1
+2. VAE mode (reconstructed x_1)
+3. sample latent from q(z|x_1) + sample VAE decoder (N(d(z), o^2I) (ODE input training),
+4. sample latent + sample VAE decoder + ODE (coupled FM reconstruction)
+5. sample from VAE prior N(0, I) + sample VAE decoder (N(d(z), o^2I) (ODE input generation)
+6. sample from VAE prior + sample VAE decoder + ODE (unconditional FM generation)
+
+Always adds noise to decoder output because that is what FM was trained on
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
+from omegaconf import OmegaConf
 from torchvision import transforms
 
 # Add src to path
@@ -24,8 +32,7 @@ if src_path not in sys.path:
 
 from fit_vae_imagenet import center_crop_arr
 from stage1 import RAE
-from stage2.transport import create_transport, Sampler
-from stage2.transport.prior import load_patch_token_vae
+from stage2.transport import create_transport, Sampler, VAEPriorSampler
 from utils.data_utils import ClassBalancedSubset, ImageNetDataset
 from utils.model_utils import instantiate_from_config
 from utils.train_utils import parse_configs
@@ -64,9 +71,6 @@ def main() -> None:
     parser.add_argument("--num-images", type=int, default=10)
     parser.add_argument("--output-dir", type=Path, default=Path("vae_fm_recon_out"))
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--prior", choices=["posterior", "gaussian"], default="posterior",
-                        help="Sample VAE latents from the posterior q(z, x_1) (default) or "
-                             "the uninformative VAE prior N(z; 0, I).")
     parser.add_argument("--data-limit-sample-percentage", type=float, default=1.0,
                         help="Percentage of samples to use per kept class (0.0-1.0, default: 1.0). "
                              "Match the VAE's training data limits to only look at in-domain images.")
@@ -90,10 +94,16 @@ def main() -> None:
     stage2_config["ckpt"] = args.fm_ckpt
     model = instantiate_from_config(stage2_config).to(device).eval()
 
-    vae_ckpt = args.vae_ckpt or (vae_prior_config.get("ckpt_path") if vae_prior_config else None)
-    if vae_ckpt is None:
+    vae_cfg = OmegaConf.to_container(vae_prior_config, resolve=True) if vae_prior_config else {}
+    if args.vae_ckpt:
+        vae_cfg["ckpt_path"] = args.vae_ckpt
+    if not vae_cfg.get("ckpt_path"):
         raise ValueError("No --vae-ckpt given and none found in config's vae_prior.ckpt_path.")
-    vae, _ = load_patch_token_vae(vae_ckpt, device)
+    vae_cfg["enabled"] = True  # from_config returns None when disabled; this script needs it
+    latent_size = tuple(int(dim) for dim in misc.get("latent_size", (768, 16, 16)))
+    vae_sampler = VAEPriorSampler.from_config(vae_cfg, latent_size, device, verbose=True)
+    vae = vae_sampler.vae
+    print(f"VAE prior marginal diagnostics: {vae_sampler.diagnose()}")
 
     sample_fn = build_sample_fn(transport_config, sampler_config, misc)
 
@@ -122,40 +132,33 @@ def main() -> None:
         image, label = dataset[idx]
         image = image.unsqueeze(0).to(device)
         x1 = rae.encode(image)
-        dist = vae.encode(x1.float())
 
-        variant_names = ["mode", "sample"]
-        if args.prior == "posterior":
-            z_by_variant = {"mode": dist.mode(), "sample": dist.sample()}
-        else:
-            z_by_variant = {
-                "mode": torch.zeros_like(dist.mode()),
-                "sample": torch.randn_like(dist.mode()),
-            }
-        std0_by_variant = {name: vae.decode(z_by_variant[name]) for name in variant_names}
-        std1_by_variant = {
-            name: std0_by_variant[name] + torch.randn_like(std0_by_variant[name])
-            for name in variant_names
-        }
+        # generate two sources for ODE: 
+        # coupled (reconstruct random x_1 with latent VAE noise, as in FM training)
+        # prior (reconstruct from a r)
+        sources = [
+            ("coupled", vae_sampler.sample_coupled(x1)),
+            ("prior", vae_sampler.sample(1, device=x1.device, dtype=x1.dtype)),
+        ]
+        if idx == 0:
+            for name, x0 in sources:
+                print(f"x0 rms[{name}]={x0.float().pow(2).mean().sqrt():.3f} "
+                      f"(decoder_std={vae_sampler.decoder_std})")
 
-        # always use decoder mode for transport
-        x0_batch = torch.cat([std0_by_variant[name] for name in variant_names], dim=0)
+        x0_batch = torch.cat([x0 for _, x0 in sources], dim=0)
         transported = sample_fn(x0_batch, model.forward)[-1]
 
-        # original image (in case of reconstruction, else zeros)
         recon_shape = (rae.decoder_output_size, rae.decoder_output_size)
-        if args.prior == "posterior":
-            panels = [F.interpolate(image, size=recon_shape, mode="bilinear", align_corners=False)]
-            panel_labels = ["original"]
-        else:
-            panels = [torch.zeros(1, 3, *recon_shape, device=device)]
-            panel_labels = ["unconditional prior"]
+        panels = [
+            F.interpolate(image, size=recon_shape, mode="bilinear", align_corners=False),
+            # VAE quality readout only; noise-free unlike FM training images
+            rae.decode(vae.decode(vae.encode(x1.float()).mode())),
+        ]
+        panel_labels = ["original", "vae mode\n(no noise)"]
 
-        for i, name in enumerate(variant_names):
-            panels.append(rae.decode(std0_by_variant[name]))
-            panel_labels.append(f"{name}\nstd0")
-            panels.append(rae.decode(std1_by_variant[name]))
-            panel_labels.append(f"{name}\nstd1")
+        for i, (name, x0) in enumerate(sources):
+            panels.append(rae.decode(x0))
+            panel_labels.append(f"{name}\nx0")
             panels.append(rae.decode(transported[i:i + 1]))
             panel_labels.append(f"{name}\ntransported")
 
