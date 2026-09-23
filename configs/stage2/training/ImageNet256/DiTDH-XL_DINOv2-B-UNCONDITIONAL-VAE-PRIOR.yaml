@@ -92,8 +92,8 @@ training:
   grad_accum_steps: 8
   num_workers: 4
   log_every: 100
-  ckpt_every: 5000
-  sample_every: 25000
+  ckpt_every: 200
+  sample_every: 400
   initial_phase_epochs: 20
   initial_lr: 0.0002
   initial_ema_decay: 0.995
